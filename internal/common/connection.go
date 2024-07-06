@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -326,6 +327,7 @@ func (c *BaseConnection) ListDir(virtualPath string) (*DirListerAt, error) {
 		id:          c.ID,
 		protocol:    c.protocol,
 		lister:      lister,
+		fsPath:      fsPath,
 	}, nil
 }
 
@@ -1820,6 +1822,7 @@ type DirListerAt struct {
 	protocol    string
 	mu          sync.Mutex
 	lister      vfs.DirLister
+	fsPath      string
 }
 
 // Add adds the given os.FileInfo to the internal cache
@@ -1862,6 +1865,27 @@ func (l *DirListerAt) Next(limit int) ([]os.FileInfo, error) {
 		if err != nil && !errors.Is(err, io.EOF) {
 			logger.Debug(l.protocol, l.id, "error retrieving directory entries: %+v", err)
 			return files, err
+		}
+		if l.protocol == ProtocolWebDAV || l.protocol == ProtocolFTP {
+			for k, file := range files {
+				if file.Mode()&os.ModeSymlink != 0 {
+					dst, err := filepath.EvalSymlinks(l.fsPath + "/" + file.Name())
+					if err != nil {
+						//c.Log(logger.LevelError, "error readlink: %#v error: %+v", l.fsPath+"/"+file.Name(), err)
+						continue
+					}
+					dstinfo, err := os.Stat(dst)
+					if err != nil {
+						//c.Log(logger.LevelError, "error stat: %#v error: %+v", dst, err)
+						continue
+					}
+					if dstinfo.IsDir() {
+						files[k] = vfs.NewFileInfo(file.Name(), true, 0, dstinfo.ModTime(), false)
+					} else {
+						files[k] = vfs.NewFileInfo(file.Name(), false, dstinfo.Size(), dstinfo.ModTime(), false)
+					}
+				}
+			}
 		}
 		files = l.user.FilterListDir(files, l.virtualPath)
 		if len(l.info) > 0 {
