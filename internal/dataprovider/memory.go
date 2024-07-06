@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -89,7 +89,7 @@ type MemoryProvider struct {
 	dbHandle *memoryProviderHandle
 }
 
-func initializeMemoryProvider(basePath string) {
+func initializeMemoryProvider(basePath string) error {
 	configFile := ""
 	if util.IsFileInputValid(config.Name) {
 		configFile = config.Name
@@ -124,10 +124,7 @@ func initializeMemoryProvider(basePath string) {
 			configFile:        configFile,
 		},
 	}
-	if err := provider.reloadConfig(); err != nil {
-		logger.Error(logSender, "", "unable to load initial data: %v", err)
-		logger.ErrorToConsole("unable to load initial data: %v", err)
-	}
+	return provider.reloadConfig()
 }
 
 func (p *MemoryProvider) checkAvailability() error {
@@ -332,7 +329,10 @@ func (p *MemoryProvider) addUser(user *User) error {
 
 	_, err = p.userExistsInternal(user.Username)
 	if err == nil {
-		return fmt.Errorf("username %q already exists", user.Username)
+		return util.NewI18nError(
+			fmt.Errorf("%w: username %v already exists", ErrDuplicatedKey, user.Username),
+			util.I18nErrorDuplicatedUsername,
+		)
 	}
 	user.ID = p.getNextID()
 	user.LastQuotaUpdate = 0
@@ -348,6 +348,9 @@ func (p *MemoryProvider) addUser(user *User) error {
 	if err := p.addUserToRole(user.Username, user.Role); err != nil {
 		return err
 	}
+	sort.Slice(user.Groups, func(i, j int) bool {
+		return user.Groups[i].Name < user.Groups[j].Name
+	})
 	var mappedGroups []string
 	for idx := range user.Groups {
 		if err = p.addUserToGroupMapping(user.Username, user.Groups[idx].Name); err != nil {
@@ -359,6 +362,9 @@ func (p *MemoryProvider) addUser(user *User) error {
 		}
 		mappedGroups = append(mappedGroups, user.Groups[idx].Name)
 	}
+	sort.Slice(user.VirtualFolders, func(i, j int) bool {
+		return user.VirtualFolders[i].Name < user.VirtualFolders[j].Name
+	})
 	var mappedFolders []string
 	for idx := range user.VirtualFolders {
 		if err = p.addUserToFolderMapping(user.Username, user.VirtualFolders[idx].Name); err != nil {
@@ -404,6 +410,9 @@ func (p *MemoryProvider) updateUser(user *User) error { //nolint:gocyclo
 	for idx := range u.Groups {
 		p.removeUserFromGroupMapping(u.Username, u.Groups[idx].Name)
 	}
+	sort.Slice(user.Groups, func(i, j int) bool {
+		return user.Groups[i].Name < user.Groups[j].Name
+	})
 	for idx := range user.Groups {
 		if err = p.addUserToGroupMapping(user.Username, user.Groups[idx].Name); err != nil {
 			// try to add old mapping
@@ -419,6 +428,9 @@ func (p *MemoryProvider) updateUser(user *User) error { //nolint:gocyclo
 	for _, oldFolder := range u.VirtualFolders {
 		p.removeRelationFromFolderMapping(oldFolder.Name, u.Username, "")
 	}
+	sort.Slice(user.VirtualFolders, func(i, j int) bool {
+		return user.VirtualFolders[i].Name < user.VirtualFolders[j].Name
+	})
 	for idx := range user.VirtualFolders {
 		if err = p.addUserToFolderMapping(user.Username, user.VirtualFolders[idx].Name); err != nil {
 			// try to add old mapping
@@ -718,7 +730,10 @@ func (p *MemoryProvider) addAdmin(admin *Admin) error {
 	}
 	_, err = p.adminExistsInternal(admin.Username)
 	if err == nil {
-		return fmt.Errorf("admin %q already exists", admin.Username)
+		return util.NewI18nError(
+			fmt.Errorf("%w: admin %q already exists", ErrDuplicatedKey, admin.Username),
+			util.I18nErrorDuplicatedUsername,
+		)
 	}
 	admin.ID = p.getNextAdminID()
 	admin.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
@@ -728,6 +743,9 @@ func (p *MemoryProvider) addAdmin(admin *Admin) error {
 		return err
 	}
 	var mappedAdmins []string
+	sort.Slice(admin.Groups, func(i, j int) bool {
+		return admin.Groups[i].Name < admin.Groups[j].Name
+	})
 	for idx := range admin.Groups {
 		if err = p.addAdminToGroupMapping(admin.Username, admin.Groups[idx].Name); err != nil {
 			// try to remove group mapping
@@ -770,6 +788,9 @@ func (p *MemoryProvider) updateAdmin(admin *Admin) error {
 	for idx := range a.Groups {
 		p.removeAdminFromGroupMapping(a.Username, a.Groups[idx].Name)
 	}
+	sort.Slice(admin.Groups, func(i, j int) bool {
+		return admin.Groups[i].Name < admin.Groups[j].Name
+	})
 	for idx := range admin.Groups {
 		if err = p.addAdminToGroupMapping(admin.Username, admin.Groups[idx].Name); err != nil {
 			// try to add old mapping
@@ -1023,13 +1044,19 @@ func (p *MemoryProvider) addGroup(group *Group) error {
 
 	_, err := p.groupExistsInternal(group.Name)
 	if err == nil {
-		return fmt.Errorf("group %q already exists", group.Name)
+		return util.NewI18nError(
+			fmt.Errorf("%w: group %q already exists", ErrDuplicatedKey, group.Name),
+			util.I18nErrorDuplicatedUsername,
+		)
 	}
 	group.ID = p.getNextGroupID()
 	group.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 	group.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 	group.Users = nil
 	group.Admins = nil
+	sort.Slice(group.VirtualFolders, func(i, j int) bool {
+		return group.VirtualFolders[i].Name < group.VirtualFolders[j].Name
+	})
 	var mappedFolders []string
 	for idx := range group.VirtualFolders {
 		if err = p.addGroupToFolderMapping(group.Name, group.VirtualFolders[idx].Name); err != nil {
@@ -1063,6 +1090,9 @@ func (p *MemoryProvider) updateGroup(group *Group) error {
 	for _, oldFolder := range g.VirtualFolders {
 		p.removeRelationFromFolderMapping(oldFolder.Name, "", g.Name)
 	}
+	sort.Slice(group.VirtualFolders, func(i, j int) bool {
+		return group.VirtualFolders[i].Name < group.VirtualFolders[j].Name
+	})
 	for idx := range group.VirtualFolders {
 		if err = p.addGroupToFolderMapping(group.Name, group.VirtualFolders[idx].Name); err != nil {
 			// try to add old mapping
@@ -1281,7 +1311,7 @@ func (p *MemoryProvider) addAdminToRole(username, role string) error {
 	}
 	r, err := p.roleExistsInternal(role)
 	if err != nil {
-		return util.NewGenericError(fmt.Sprintf("role %q does not exist", role))
+		return fmt.Errorf("%w: role %q does not exist", ErrForeignKeyViolated, role)
 	}
 	if !util.Contains(r.Admins, username) {
 		r.Admins = append(r.Admins, username)
@@ -1315,7 +1345,7 @@ func (p *MemoryProvider) addUserToRole(username, role string) error {
 	}
 	r, err := p.roleExistsInternal(role)
 	if err != nil {
-		return util.NewGenericError(fmt.Sprintf("role %q does not exist", role))
+		return fmt.Errorf("%w: role %q does not exist", ErrForeignKeyViolated, role)
 	}
 	if !util.Contains(r.Users, username) {
 		r.Users = append(r.Users, username)
@@ -1488,7 +1518,10 @@ func (p *MemoryProvider) addFolder(folder *vfs.BaseVirtualFolder) error {
 
 	_, err = p.folderExistsInternal(folder.Name)
 	if err == nil {
-		return fmt.Errorf("folder %q already exists", folder.Name)
+		return util.NewI18nError(
+			fmt.Errorf("%w: folder %q already exists", ErrDuplicatedKey, folder.Name),
+			util.I18nErrorDuplicatedUsername,
+		)
 	}
 	folder.ID = p.getNextFolderID()
 	folder.Users = nil
@@ -1622,12 +1655,12 @@ func (p *MemoryProvider) addAPIKey(apiKey *APIKey) error {
 	}
 	if apiKey.User != "" {
 		if _, err := p.userExistsInternal(apiKey.User); err != nil {
-			return util.NewValidationError(fmt.Sprintf("related user %q does not exists", apiKey.User))
+			return fmt.Errorf("%w: related user %q does not exists", ErrForeignKeyViolated, apiKey.User)
 		}
 	}
 	if apiKey.Admin != "" {
 		if _, err := p.adminExistsInternal(apiKey.Admin); err != nil {
-			return util.NewValidationError(fmt.Sprintf("related admin %q does not exists", apiKey.User))
+			return fmt.Errorf("%w: related admin %q does not exists", ErrForeignKeyViolated, apiKey.Admin)
 		}
 	}
 	apiKey.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
@@ -1656,12 +1689,12 @@ func (p *MemoryProvider) updateAPIKey(apiKey *APIKey) error {
 	}
 	if apiKey.User != "" {
 		if _, err := p.userExistsInternal(apiKey.User); err != nil {
-			return util.NewValidationError(fmt.Sprintf("related user %q does not exists", apiKey.User))
+			return fmt.Errorf("%w: related user %q does not exists", ErrForeignKeyViolated, apiKey.User)
 		}
 	}
 	if apiKey.Admin != "" {
 		if _, err := p.adminExistsInternal(apiKey.Admin); err != nil {
-			return util.NewValidationError(fmt.Sprintf("related admin %q does not exists", apiKey.User))
+			return fmt.Errorf("%w: related admin %q does not exists", ErrForeignKeyViolated, apiKey.Admin)
 		}
 	}
 	apiKey.ID = k.ID
@@ -2148,7 +2181,10 @@ func (p *MemoryProvider) addEventAction(action *BaseEventAction) error {
 	}
 	_, err = p.actionExistsInternal(action.Name)
 	if err == nil {
-		return fmt.Errorf("event action %q already exists", action.Name)
+		return util.NewI18nError(
+			fmt.Errorf("%w: event action %q already exists", ErrDuplicatedKey, action.Name),
+			util.I18nErrorDuplicatedName,
+		)
 	}
 	action.ID = p.getNextActionID()
 	action.Rules = nil
@@ -2324,7 +2360,10 @@ func (p *MemoryProvider) addEventRule(rule *EventRule) error {
 	}
 	_, err := p.ruleExistsInternal(rule.Name)
 	if err == nil {
-		return fmt.Errorf("event rule %q already exists", rule.Name)
+		return util.NewI18nError(
+			fmt.Errorf("%w: event rule %q already exists", ErrDuplicatedKey, rule.Name),
+			util.I18nErrorDuplicatedName,
+		)
 	}
 	rule.ID = p.getNextRuleID()
 	rule.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
@@ -2475,7 +2514,10 @@ func (p *MemoryProvider) addRole(role *Role) error {
 
 	_, err := p.roleExistsInternal(role.Name)
 	if err == nil {
-		return fmt.Errorf("role %q already exists", role.Name)
+		return util.NewI18nError(
+			fmt.Errorf("%w: role %q already exists", ErrDuplicatedKey, role.Name),
+			util.I18nErrorDuplicatedName,
+		)
 	}
 	role.ID = p.getNextRoleID()
 	role.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
@@ -2627,7 +2669,10 @@ func (p *MemoryProvider) addIPListEntry(entry *IPListEntry) error {
 	}
 	_, err := p.ipListEntryExistsInternal(entry)
 	if err == nil {
-		return fmt.Errorf("entry %q already exists", entry.IPOrNet)
+		return util.NewI18nError(
+			fmt.Errorf("%w: entry %q already exists", ErrDuplicatedKey, entry.IPOrNet),
+			util.I18nErrorDuplicatedIPNet,
+		)
 	}
 	entry.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 	entry.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())

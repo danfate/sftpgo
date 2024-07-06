@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -66,7 +66,7 @@ const (
 
 var (
 	tokenDuration      = 20 * time.Minute
-	shareTokenDuration = 12 * time.Hour
+	shareTokenDuration = 2 * time.Hour
 	// csrf token duration is greater than normal token duration to reduce issues
 	// with the login form
 	csrfTokenDuration     = 6 * time.Hour
@@ -331,7 +331,7 @@ func isTokenInvalidated(r *http.Request) bool {
 		token := fn(r)
 		if token != "" {
 			isTokenFound = true
-			if _, ok := invalidatedJWTTokens.Load(token); ok {
+			if invalidatedJWTTokens.Get(token) {
 				return true
 			}
 		}
@@ -343,11 +343,11 @@ func isTokenInvalidated(r *http.Request) bool {
 func invalidateToken(r *http.Request) {
 	tokenString := jwtauth.TokenFromHeader(r)
 	if tokenString != "" {
-		invalidatedJWTTokens.Store(tokenString, time.Now().Add(tokenDuration).UTC())
+		invalidatedJWTTokens.Add(tokenString, time.Now().Add(tokenDuration).UTC())
 	}
 	tokenString = jwtauth.TokenFromCookie(r)
 	if tokenString != "" {
-		invalidatedJWTTokens.Store(tokenString, time.Now().Add(tokenDuration).UTC())
+		invalidatedJWTTokens.Add(tokenString, time.Now().Add(tokenDuration).UTC())
 	}
 }
 
@@ -440,18 +440,21 @@ func verifyOAuth2Token(tokenString, ip string) (string, error) {
 	token, err := jwtauth.VerifyToken(csrfTokenAuth, tokenString)
 	if err != nil || token == nil {
 		logger.Debug(logSender, "", "error validating OAuth2 token %q: %v", tokenString, err)
-		return "", fmt.Errorf("unable to verify OAuth2 state: %v", err)
+		return "", util.NewI18nError(
+			fmt.Errorf("unable to verify OAuth2 state: %v", err),
+			util.I18nOAuth2ErrorVerifyState,
+		)
 	}
 
 	if !util.Contains(token.Audience(), tokenAudienceOAuth2) {
 		logger.Debug(logSender, "", "error validating OAuth2 token audience")
-		return "", errors.New("invalid OAuth2 state")
+		return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
 	}
 
 	if tokenValidationMode != tokenValidationNoIPMatch {
 		if !util.Contains(token.Audience(), ip) {
 			logger.Debug(logSender, "", "error validating OAuth2 token IP audience")
-			return "", errors.New("invalid OAuth2 state")
+			return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
 		}
 	}
 	if val, ok := token.Get(jwt.JwtIDKey); ok {
@@ -460,5 +463,5 @@ func verifyOAuth2Token(tokenString, ip string) (string, error) {
 		}
 	}
 	logger.Debug(logSender, "", "jti not found in OAuth2 token")
-	return "", errors.New("invalid OAuth2 state")
+	return "", util.NewI18nError(errors.New("invalid OAuth2 state"), util.I18nOAuth2InvalidState)
 }

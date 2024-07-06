@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -132,7 +132,7 @@ func getLogSearchParamsFromRequest(r *http.Request) (eventsearcher.LogEventSearc
 	s.Protocols = getCommaSeparatedQueryParam(r, "protocols")
 	events := getCommaSeparatedQueryParam(r, "events")
 	for _, ev := range events {
-		evType, err := strconv.ParseUint(ev, 10, 32)
+		evType, err := strconv.ParseInt(ev, 10, 32)
 		if err == nil {
 			s.Events = append(s.Events, int32(evType))
 		}
@@ -472,6 +472,8 @@ func getLogEventString(event notifier.LogEventType) string {
 		return "No login tried"
 	case notifier.LogEventTypeNotNegotiated:
 		return "Algorithm negotiation failed"
+	case notifier.LogEventTypeLoginOK:
+		return "Login succeeded"
 	default:
 		return ""
 	}

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -26,8 +26,7 @@ import (
 	"path/filepath"
 	"time"
 
-	// we import go-sqlite3 here to be able to disable SQLite support using a build tag
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/util"
@@ -93,8 +92,8 @@ CREATE TABLE "{{users}}" ("id" integer NOT NULL PRIMARY KEY, "username" varchar(
 "upload_bandwidth" integer NOT NULL, "download_bandwidth" integer NOT NULL, "last_login" bigint NOT NULL,
 "filters" text NULL, "filesystem" text NULL, "additional_info" text NULL, "created_at" bigint NOT NULL,
 "updated_at" bigint NOT NULL, "email" varchar(255) NULL, "upload_data_transfer" integer NOT NULL,
-"download_data_transfer" integer NOT NULL, "total_data_transfer" integer NOT NULL, "used_upload_data_transfer" integer NOT NULL,
-"used_download_data_transfer" integer NOT NULL, "deleted_at" bigint NOT NULL, "first_download" bigint NOT NULL,
+"download_data_transfer" integer NOT NULL, "total_data_transfer" integer NOT NULL, "used_upload_data_transfer" bigint NOT NULL,
+"used_download_data_transfer" bigint NOT NULL, "deleted_at" bigint NOT NULL, "first_download" bigint NOT NULL,
 "first_upload" bigint NOT NULL, "last_password_change" bigint NOT NULL, "role_id" integer NULL REFERENCES "{{roles}}" ("id") ON DELETE SET NULL);
 CREATE TABLE "{{groups_folders_mapping}}" ("id" integer NOT NULL PRIMARY KEY,
 "folder_id" integer NOT NULL REFERENCES "{{folders}}" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
@@ -264,11 +263,11 @@ func (p *SQLiteProvider) userExists(username, role string) (User, error) {
 }
 
 func (p *SQLiteProvider) addUser(user *User) error {
-	return sqlCommonAddUser(user, p.dbHandle)
+	return p.normalizeError(sqlCommonAddUser(user, p.dbHandle), fieldUsername)
 }
 
 func (p *SQLiteProvider) updateUser(user *User) error {
-	return sqlCommonUpdateUser(user, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateUser(user, p.dbHandle), -1)
 }
 
 func (p *SQLiteProvider) deleteUser(user User, softDelete bool) error {
@@ -310,7 +309,7 @@ func (p *SQLiteProvider) getFolderByName(name string) (vfs.BaseVirtualFolder, er
 }
 
 func (p *SQLiteProvider) addFolder(folder *vfs.BaseVirtualFolder) error {
-	return sqlCommonAddFolder(folder, p.dbHandle)
+	return p.normalizeError(sqlCommonAddFolder(folder, p.dbHandle), fieldName)
 }
 
 func (p *SQLiteProvider) updateFolder(folder *vfs.BaseVirtualFolder) error {
@@ -346,7 +345,7 @@ func (p *SQLiteProvider) groupExists(name string) (Group, error) {
 }
 
 func (p *SQLiteProvider) addGroup(group *Group) error {
-	return sqlCommonAddGroup(group, p.dbHandle)
+	return p.normalizeError(sqlCommonAddGroup(group, p.dbHandle), fieldName)
 }
 
 func (p *SQLiteProvider) updateGroup(group *Group) error {
@@ -366,11 +365,11 @@ func (p *SQLiteProvider) adminExists(username string) (Admin, error) {
 }
 
 func (p *SQLiteProvider) addAdmin(admin *Admin) error {
-	return sqlCommonAddAdmin(admin, p.dbHandle)
+	return p.normalizeError(sqlCommonAddAdmin(admin, p.dbHandle), fieldUsername)
 }
 
 func (p *SQLiteProvider) updateAdmin(admin *Admin) error {
-	return sqlCommonUpdateAdmin(admin, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateAdmin(admin, p.dbHandle), -1)
 }
 
 func (p *SQLiteProvider) deleteAdmin(admin Admin) error {
@@ -394,11 +393,11 @@ func (p *SQLiteProvider) apiKeyExists(keyID string) (APIKey, error) {
 }
 
 func (p *SQLiteProvider) addAPIKey(apiKey *APIKey) error {
-	return sqlCommonAddAPIKey(apiKey, p.dbHandle)
+	return p.normalizeError(sqlCommonAddAPIKey(apiKey, p.dbHandle), -1)
 }
 
 func (p *SQLiteProvider) updateAPIKey(apiKey *APIKey) error {
-	return sqlCommonUpdateAPIKey(apiKey, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateAPIKey(apiKey, p.dbHandle), -1)
 }
 
 func (p *SQLiteProvider) deleteAPIKey(apiKey APIKey) error {
@@ -422,11 +421,11 @@ func (p *SQLiteProvider) shareExists(shareID, username string) (Share, error) {
 }
 
 func (p *SQLiteProvider) addShare(share *Share) error {
-	return sqlCommonAddShare(share, p.dbHandle)
+	return p.normalizeError(sqlCommonAddShare(share, p.dbHandle), fieldName)
 }
 
 func (p *SQLiteProvider) updateShare(share *Share) error {
-	return sqlCommonUpdateShare(share, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateShare(share, p.dbHandle), -1)
 }
 
 func (p *SQLiteProvider) deleteShare(share Share) error {
@@ -526,7 +525,7 @@ func (p *SQLiteProvider) eventActionExists(name string) (BaseEventAction, error)
 }
 
 func (p *SQLiteProvider) addEventAction(action *BaseEventAction) error {
-	return sqlCommonAddEventAction(action, p.dbHandle)
+	return p.normalizeError(sqlCommonAddEventAction(action, p.dbHandle), fieldName)
 }
 
 func (p *SQLiteProvider) updateEventAction(action *BaseEventAction) error {
@@ -554,7 +553,7 @@ func (p *SQLiteProvider) eventRuleExists(name string) (EventRule, error) {
 }
 
 func (p *SQLiteProvider) addEventRule(rule *EventRule) error {
-	return sqlCommonAddEventRule(rule, p.dbHandle)
+	return p.normalizeError(sqlCommonAddEventRule(rule, p.dbHandle), fieldName)
 }
 
 func (p *SQLiteProvider) updateEventRule(rule *EventRule) error {
@@ -606,7 +605,7 @@ func (p *SQLiteProvider) roleExists(name string) (Role, error) {
 }
 
 func (p *SQLiteProvider) addRole(role *Role) error {
-	return sqlCommonAddRole(role, p.dbHandle)
+	return p.normalizeError(sqlCommonAddRole(role, p.dbHandle), fieldName)
 }
 
 func (p *SQLiteProvider) updateRole(role *Role) error {
@@ -630,7 +629,7 @@ func (p *SQLiteProvider) ipListEntryExists(ipOrNet string, listType IPListType) 
 }
 
 func (p *SQLiteProvider) addIPListEntry(entry *IPListEntry) error {
-	return sqlCommonAddIPListEntry(entry, p.dbHandle)
+	return p.normalizeError(sqlCommonAddIPListEntry(entry, p.dbHandle), fieldIPNet)
 }
 
 func (p *SQLiteProvider) updateIPListEntry(entry *IPListEntry) error {
@@ -715,6 +714,8 @@ func (p *SQLiteProvider) migrateDatabase() error { //nolint:dupl
 		providerLog(logger.LevelError, "%v", err)
 		logger.ErrorToConsole("%v", err)
 		return err
+	case version == 28:
+		return updateSQLiteDatabaseFrom28To29(p.dbHandle)
 	default:
 		if version > sqlDatabaseVersion {
 			providerLog(logger.LevelError, "database schema version %d is newer than the supported one: %d", version,
@@ -737,6 +738,8 @@ func (p *SQLiteProvider) revertDatabase(targetVersion int) error {
 	}
 
 	switch dbVersion.Version {
+	case 29:
+		return downgradeSQLiteDatabaseFrom29To28(p.dbHandle)
 	default:
 		return fmt.Errorf("database schema version not handled: %d", dbVersion.Version)
 	}
@@ -745,6 +748,53 @@ func (p *SQLiteProvider) revertDatabase(targetVersion int) error {
 func (p *SQLiteProvider) resetDatabase() error {
 	sql := sqlReplaceAll(sqliteResetSQL)
 	return sqlCommonExecSQLAndUpdateDBVersion(p.dbHandle, []string{sql}, 0, false)
+}
+
+func (p *SQLiteProvider) normalizeError(err error, fieldType int) error {
+	if err == nil {
+		return nil
+	}
+	if e, ok := err.(sqlite3.Error); ok {
+		switch e.ExtendedCode {
+		case 1555, 2067:
+			var message string
+			switch fieldType {
+			case fieldUsername:
+				message = util.I18nErrorDuplicatedUsername
+			case fieldIPNet:
+				message = util.I18nErrorDuplicatedIPNet
+			default:
+				message = util.I18nErrorDuplicatedName
+			}
+			return util.NewI18nError(
+				fmt.Errorf("%w: %s", ErrDuplicatedKey, err.Error()),
+				message,
+			)
+		case 787:
+			return fmt.Errorf("%w: %s", ErrForeignKeyViolated, err.Error())
+		}
+	}
+	return err
+}
+
+func updateSQLiteDatabaseFrom28To29(dbHandle *sql.DB) error {
+	logger.InfoToConsole("updating database schema version: 28 -> 29")
+	providerLog(logger.LevelInfo, "updating database schema version: 28 -> 29")
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
+	defer cancel()
+
+	return sqlCommonUpdateDatabaseVersion(ctx, dbHandle, 29)
+}
+
+func downgradeSQLiteDatabaseFrom29To28(dbHandle *sql.DB) error {
+	logger.InfoToConsole("downgrading database schema version: 29 -> 28")
+	providerLog(logger.LevelInfo, "downgrading database schema version: 29 -> 28")
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSQLQueryTimeout)
+	defer cancel()
+
+	return sqlCommonUpdateDatabaseVersion(ctx, dbHandle, 28)
 }
 
 /*func setPragmaFK(dbHandle *sql.DB, value string) error {

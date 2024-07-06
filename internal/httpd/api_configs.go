@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -23,6 +23,7 @@ import (
 
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
 	"github.com/drakkan/sftpgo/v2/internal/kms"
+	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/smtp"
 	"github.com/drakkan/sftpgo/v2/internal/util"
 )
@@ -72,6 +73,7 @@ func testSMTPConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := req.SendEmail([]string{req.Recipient}, nil, "SFTPGo - Testing Email Settings",
 		"It appears your SFTPGo email is setup correctly!", smtp.EmailContentTypeTextPlain); err != nil {
+		logger.Info(logSender, "", "unable to send test email: %v", err)
 		sendAPIResponse(w, r, err, "", http.StatusInternalServerError)
 		return
 	}

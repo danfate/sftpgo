@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -23,7 +23,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +38,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/kms"
 	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
+	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
 
@@ -419,6 +419,9 @@ func TestDefenderIntegration(t *testing.T) {
 		ObservationTime:  15,
 		EntriesSoftLimit: 100,
 		EntriesHardLimit: 150,
+		LoginDelay: LoginDelay{
+			PasswordFailed: 200,
+		},
 	}
 	err = Initialize(Config, 0)
 	// ScoreInvalid cannot be greater than threshold
@@ -476,6 +479,16 @@ func TestDefenderIntegration(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Nil(t, banTime)
 	assert.False(t, DeleteDefenderHost(ip))
+
+	startTime := time.Now()
+	DelayLogin(nil)
+	elapsed := time.Since(startTime)
+	assert.Less(t, elapsed, time.Millisecond*50)
+
+	startTime = time.Now()
+	DelayLogin(ErrInternalFailure)
+	elapsed = time.Since(startTime)
+	assert.Greater(t, elapsed, time.Millisecond*150)
 
 	Config = configCopy
 }
@@ -669,9 +682,26 @@ func TestConnectionRoles(t *testing.T) {
 }
 
 func TestMaxConnectionPerHost(t *testing.T) {
-	oldValue := Config.MaxPerHostConnections
+	defender, err := newInMemoryDefender(&DefenderConfig{
+		Enabled:            true,
+		Driver:             DefenderDriverMemory,
+		BanTime:            30,
+		BanTimeIncrement:   50,
+		Threshold:          15,
+		ScoreInvalid:       2,
+		ScoreValid:         1,
+		ScoreLimitExceeded: 3,
+		ObservationTime:    30,
+		EntriesSoftLimit:   100,
+		EntriesHardLimit:   150,
+	})
+	require.NoError(t, err)
+
+	oldMaxPerHostConn := Config.MaxPerHostConnections
+	oldDefender := Config.defender
 
 	Config.MaxPerHostConnections = 2
+	Config.defender = defender
 
 	ipAddr := "192.168.9.9"
 	Connections.AddClientConnection(ipAddr)
@@ -683,14 +713,30 @@ func TestMaxConnectionPerHost(t *testing.T) {
 	Connections.AddClientConnection(ipAddr)
 	assert.Error(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolFTP))
 	assert.Equal(t, int32(3), Connections.GetClientConnections())
+	// Add the IP to the defender safe list
+	entry := dataprovider.IPListEntry{
+		IPOrNet: ipAddr,
+		Type:    dataprovider.IPListTypeDefender,
+		Mode:    dataprovider.ListModeAllow,
+	}
+	err = dataprovider.AddIPListEntry(&entry, "", "", "")
+	assert.NoError(t, err)
 
+	Connections.AddClientConnection(ipAddr)
+	assert.NoError(t, Connections.IsNewConnectionAllowed(ipAddr, ProtocolSSH))
+
+	err = dataprovider.DeleteIPListEntry(entry.IPOrNet, dataprovider.IPListTypeDefender, "", "", "")
+	assert.NoError(t, err)
+
+	Connections.RemoveClientConnection(ipAddr)
 	Connections.RemoveClientConnection(ipAddr)
 	Connections.RemoveClientConnection(ipAddr)
 	Connections.RemoveClientConnection(ipAddr)
 
 	assert.Equal(t, int32(0), Connections.GetClientConnections())
 
-	Config.MaxPerHostConnections = oldValue
+	Config.MaxPerHostConnections = oldMaxPerHostConn
+	Config.defender = oldDefender
 }
 
 func TestIdleConnections(t *testing.T) {
@@ -716,6 +762,7 @@ func TestIdleConnections(t *testing.T) {
 	user := dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username: username,
+			Status:   1,
 		},
 	}
 	c := NewBaseConnection(sshConn1.id+"_1", ProtocolSFTP, "", "", user)
@@ -740,15 +787,34 @@ func TestIdleConnections(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, Connections.GetActiveSessions(username), 2)
 
-	cFTP := NewBaseConnection("id2", ProtocolFTP, "", "", dataprovider.User{})
+	cFTP := NewBaseConnection("id2", ProtocolFTP, "", "", dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			Status: 1,
+		},
+	})
 	cFTP.lastActivity.Store(time.Now().UnixNano())
 	fakeConn = &fakeConnection{
 		BaseConnection: cFTP,
 	}
 	err = Connections.Add(fakeConn)
 	assert.NoError(t, err)
-	assert.Equal(t, Connections.GetActiveSessions(username), 2)
-	assert.Len(t, Connections.GetStats(""), 3)
+	// the user is expired, this connection will be removed
+	cDAV := NewBaseConnection("id3", ProtocolWebDAV, "", "", dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			Username:       username + "_2",
+			Status:         1,
+			ExpirationDate: util.GetTimeAsMsSinceEpoch(time.Now().Add(-24 * time.Hour)),
+		},
+	})
+	cDAV.lastActivity.Store(time.Now().UnixNano())
+	fakeConn = &fakeConnection{
+		BaseConnection: cDAV,
+	}
+	err = Connections.Add(fakeConn)
+	assert.NoError(t, err)
+
+	assert.Equal(t, 2, Connections.GetActiveSessions(username))
+	assert.Len(t, Connections.GetStats(""), 4)
 	Connections.RLock()
 	assert.Len(t, Connections.sshConnections, 2)
 	Connections.RUnlock()
@@ -892,23 +958,10 @@ func TestConnectionStatus(t *testing.T) {
 	assert.Len(t, stats, 3)
 	for _, stat := range stats {
 		assert.Equal(t, stat.Username, username)
-		assert.True(t, strings.HasPrefix(stat.GetConnectionInfo(), stat.Protocol))
-		assert.True(t, strings.HasPrefix(stat.GetConnectionDuration(), "00:"))
 		if stat.ConnectionID == "SFTP_id1" {
 			assert.Len(t, stat.Transfers, 2)
-			assert.Greater(t, len(stat.GetTransfersAsString()), 0)
-			for _, tr := range stat.Transfers {
-				if tr.OperationType == operationDownload {
-					assert.True(t, strings.HasPrefix(tr.getConnectionTransferAsString(), "DL"))
-				} else if tr.OperationType == operationUpload {
-					assert.True(t, strings.HasPrefix(tr.getConnectionTransferAsString(), "UL"))
-				}
-			}
 		} else if stat.ConnectionID == "DAV_id3" {
 			assert.Len(t, stat.Transfers, 1)
-			assert.Greater(t, len(stat.GetTransfersAsString()), 0)
-		} else {
-			assert.Equal(t, 0, len(stat.GetTransfersAsString()))
 		}
 	}
 
@@ -1024,7 +1077,7 @@ func TestProxyPolicy(t *testing.T) {
 	assert.Equal(t, proxyproto.SKIP, policy)
 	policy, err = p(&net.TCPAddr{IP: net.ParseIP("10.8.1.5")})
 	assert.NoError(t, err)
-	assert.Equal(t, proxyproto.REQUIRE, policy)
+	assert.Equal(t, proxyproto.REJECT, policy)
 }
 
 func TestProxyProtocolVersion(t *testing.T) {
@@ -1500,38 +1553,6 @@ func TestUpdateTransferTimestamps(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestMetadataAPI(t *testing.T) {
-	username := "metadatauser"
-	require.False(t, ActiveMetadataChecks.Remove(username))
-	require.True(t, ActiveMetadataChecks.Add(username, ""))
-	require.False(t, ActiveMetadataChecks.Add(username, ""))
-	checks := ActiveMetadataChecks.Get("")
-	require.Len(t, checks, 1)
-	checks[0].Username = username + "a"
-	checks = ActiveMetadataChecks.Get("")
-	require.Len(t, checks, 1)
-	require.Equal(t, username, checks[0].Username)
-	require.True(t, ActiveMetadataChecks.Remove(username))
-	require.Len(t, ActiveMetadataChecks.Get(""), 0)
-}
-
-func TestMetadataAPIRole(t *testing.T) {
-	username := "muser"
-	role1 := "r1"
-	role2 := "r2"
-	require.True(t, ActiveMetadataChecks.Add(username, role2))
-	require.False(t, ActiveMetadataChecks.Add(username, ""))
-	checks := ActiveMetadataChecks.Get("")
-	require.Len(t, checks, 1)
-	assert.Empty(t, checks[0].Role)
-	checks = ActiveMetadataChecks.Get(role1)
-	require.Len(t, checks, 0)
-	checks = ActiveMetadataChecks.Get(role2)
-	require.Len(t, checks, 1)
-	require.True(t, ActiveMetadataChecks.Remove(username))
-	require.Len(t, ActiveMetadataChecks.Get(""), 0)
-}
-
 func TestIPList(t *testing.T) {
 	type test struct {
 		ip            string
@@ -1748,6 +1769,32 @@ func TestSQLPlaceholderLimits(t *testing.T) {
 		err = dataprovider.DeleteGroup(groupName, "", "", "")
 		assert.NoError(t, err)
 	}
+}
+
+func TestALPNProtocols(t *testing.T) {
+	protocols := util.GetALPNProtocols(nil)
+	assert.Equal(t, []string{"http/1.1", "h2"}, protocols)
+	protocols = util.GetALPNProtocols([]string{"invalid1", "invalid2"})
+	assert.Equal(t, []string{"http/1.1", "h2"}, protocols)
+	protocols = util.GetALPNProtocols([]string{"invalid1", "h2", "invalid2"})
+	assert.Equal(t, []string{"h2"}, protocols)
+	protocols = util.GetALPNProtocols([]string{"h2", "http/1.1"})
+	assert.Equal(t, []string{"h2", "http/1.1"}, protocols)
+}
+
+func TestServerVersion(t *testing.T) {
+	appName := "SFTPGo"
+	version.SetConfig("")
+	v := version.GetServerVersion("_", false)
+	assert.Equal(t, fmt.Sprintf("%s_%s", appName, version.Get().Version), v)
+	v = version.GetServerVersion("-", true)
+	assert.Equal(t, fmt.Sprintf("%s-%s-", appName, version.Get().Version), v)
+	version.SetConfig("short")
+	v = version.GetServerVersion("_", false)
+	assert.Equal(t, appName, v)
+	v = version.GetServerVersion("_", true)
+	assert.Equal(t, appName+"_", v)
+	version.SetConfig("")
 }
 
 func BenchmarkBcryptHashing(b *testing.B) {

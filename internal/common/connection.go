@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -18,9 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -108,6 +108,14 @@ func (c *BaseConnection) GetRole() string {
 // GetMaxSessions returns the maximum number of concurrent sessions allowed
 func (c *BaseConnection) GetMaxSessions() int {
 	return c.User.MaxSessions
+}
+
+// isAccessAllowed returns true if the user's access conditions are met
+func (c *BaseConnection) isAccessAllowed() bool {
+	if err := c.User.CheckLoginConditions(); err != nil {
+		return false
+	}
+	return true
 }
 
 // GetProtocol returns the protocol for the connection
@@ -298,7 +306,7 @@ func (c *BaseConnection) truncateOpenHandle(fsPath string, size int64) (int64, e
 }
 
 // ListDir reads the directory matching virtualPath and returns a list of directory entries
-func (c *BaseConnection) ListDir(virtualPath string) ([]os.FileInfo, error) {
+func (c *BaseConnection) ListDir(virtualPath string) (*DirListerAt, error) {
 	if !c.User.HasPerm(dataprovider.PermListItems, virtualPath) {
 		return nil, c.GetPermissionDeniedError()
 	}
@@ -306,33 +314,19 @@ func (c *BaseConnection) ListDir(virtualPath string) ([]os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	files, err := fs.ReadDir(fsPath)
+	lister, err := fs.ReadDir(fsPath)
 	if err != nil {
 		c.Log(logger.LevelDebug, "error listing directory: %+v", err)
 		return nil, c.GetFsError(fs, err)
 	}
-	if c.protocol == ProtocolWebDAV || c.protocol == ProtocolFTP {
-		for k, file := range files {
-			if file.Mode()&os.ModeSymlink != 0 {
-				dst, err := filepath.EvalSymlinks(fsPath + "/" + file.Name())
-				if err != nil {
-					c.Log(logger.LevelError, "error readlink: %#v error: %+v", fsPath+"/"+file.Name(), err)
-					continue
-				}
-				dstinfo, err := os.Stat(dst)
-				if err != nil {
-					c.Log(logger.LevelError, "error stat: %#v error: %+v", dst, err)
-					continue
-				}
-				if dstinfo.IsDir() {
-					files[k] = vfs.NewFileInfo(file.Name(), true, 0, dstinfo.ModTime(), false)
-				} else {
-					files[k] = vfs.NewFileInfo(file.Name(), false, dstinfo.Size(), dstinfo.ModTime(), false)
-				}
-			}
-		}
-	}
-	return c.User.FilterListDir(files, virtualPath), nil
+	return &DirListerAt{
+		virtualPath: virtualPath,
+		user:        &c.User,
+		info:        c.User.GetVirtualFoldersInfo(virtualPath),
+		id:          c.ID,
+		protocol:    c.protocol,
+		lister:      lister,
+	}, nil
 }
 
 // CheckParentDirs tries to create the specified directory and any missing parent dirs
@@ -365,14 +359,19 @@ func (c *BaseConnection) CheckParentDirs(virtualPath string) error {
 }
 
 // GetCreateChecks returns the checks for creating new files
-func (c *BaseConnection) GetCreateChecks(virtualPath string, isNewFile bool) int {
+func (c *BaseConnection) GetCreateChecks(virtualPath string, isNewFile bool, isResume bool) int {
+	result := 0
 	if !isNewFile {
-		return 0
+		if isResume {
+			result += vfs.CheckResume
+		}
+		return result
 	}
 	if !c.User.HasPerm(dataprovider.PermCreateDirs, path.Dir(virtualPath)) {
-		return vfs.CheckParentDir
+		result += vfs.CheckParentDir
+		return result
 	}
-	return 0
+	return result
 }
 
 // CreateDir creates a new directory at the specified fsPath
@@ -528,24 +527,42 @@ func (c *BaseConnection) RemoveDir(virtualPath string) error {
 	return nil
 }
 
-func (c *BaseConnection) doRecursiveRemoveDirEntry(virtualPath string, info os.FileInfo) error {
+func (c *BaseConnection) doRecursiveRemoveDirEntry(virtualPath string, info os.FileInfo, recursion int) error {
 	fs, fsPath, err := c.GetFsAndResolvedPath(virtualPath)
 	if err != nil {
 		return err
 	}
-	return c.doRecursiveRemove(fs, fsPath, virtualPath, info)
+	return c.doRecursiveRemove(fs, fsPath, virtualPath, info, recursion)
 }
 
-func (c *BaseConnection) doRecursiveRemove(fs vfs.Fs, fsPath, virtualPath string, info os.FileInfo) error {
+func (c *BaseConnection) doRecursiveRemove(fs vfs.Fs, fsPath, virtualPath string, info os.FileInfo, recursion int) error {
 	if info.IsDir() {
-		entries, err := c.ListDir(virtualPath)
-		if err != nil {
-			return fmt.Errorf("unable to get contents for dir %q: %w", virtualPath, err)
+		if recursion >= util.MaxRecursion {
+			c.Log(logger.LevelError, "recursive rename failed, recursion too depth: %d", recursion)
+			return util.ErrRecursionTooDeep
 		}
-		for _, fi := range entries {
-			targetPath := path.Join(virtualPath, fi.Name())
-			if err := c.doRecursiveRemoveDirEntry(targetPath, fi); err != nil {
-				return err
+		recursion++
+		lister, err := c.ListDir(virtualPath)
+		if err != nil {
+			return fmt.Errorf("unable to get lister for dir %q: %w", virtualPath, err)
+		}
+		defer lister.Close()
+
+		for {
+			entries, err := lister.Next(vfs.ListerBatchSize)
+			finished := errors.Is(err, io.EOF)
+			if err != nil && !finished {
+				return fmt.Errorf("unable to get content for dir %q: %w", virtualPath, err)
+			}
+			for _, fi := range entries {
+				targetPath := path.Join(virtualPath, fi.Name())
+				if err := c.doRecursiveRemoveDirEntry(targetPath, fi, recursion); err != nil {
+					return err
+				}
+			}
+			if finished {
+				lister.Close()
+				break
 			}
 		}
 		return c.RemoveDir(virtualPath)
@@ -569,7 +586,7 @@ func (c *BaseConnection) RemoveAll(virtualPath string) error {
 		if err := c.IsRemoveDirAllowed(fs, fsPath, virtualPath); err != nil {
 			return err
 		}
-		return c.doRecursiveRemove(fs, fsPath, virtualPath, fi)
+		return c.doRecursiveRemove(fs, fsPath, virtualPath, fi, 0)
 	}
 	return c.RemoveFile(fs, fsPath, virtualPath, fi)
 }
@@ -606,6 +623,9 @@ func (c *BaseConnection) checkCopy(srcInfo, dstInfo os.FileInfo, virtualSource, 
 }
 
 func (c *BaseConnection) copyFile(virtualSourcePath, virtualTargetPath string, srcSize int64) error {
+	if !c.User.HasPerm(dataprovider.PermCopy, virtualSourcePath) || !c.User.HasPerm(dataprovider.PermCopy, virtualTargetPath) {
+		return c.GetPermissionDeniedError()
+	}
 	if ok, _ := c.User.IsFileAllowed(virtualTargetPath); !ok {
 		return fmt.Errorf("file %q is not allowed: %w", virtualTargetPath, c.GetPermissionDeniedError())
 	}
@@ -619,7 +639,14 @@ func (c *BaseConnection) copyFile(virtualSourcePath, virtualTargetPath string, s
 			if err != nil {
 				return err
 			}
-			return copier.CopyFile(fsSourcePath, fsTargetPath, srcSize)
+			startTime := time.Now()
+			numFiles, sizeDiff, err := copier.CopyFile(fsSourcePath, fsTargetPath, srcSize)
+			elapsed := time.Since(startTime).Nanoseconds() / 1000000
+			updateUserQuotaAfterFileWrite(c, virtualTargetPath, numFiles, sizeDiff)
+			logger.CommandLog(copyLogSender, fsSourcePath, fsTargetPath, c.User.Username, "", c.ID, c.protocol, -1, -1,
+				"", "", "", srcSize, c.localAddr, c.remoteAddr, elapsed)
+			ExecuteActionNotification(c, operationCopy, fsSourcePath, virtualSourcePath, fsTargetPath, virtualTargetPath, "", srcSize, err, elapsed, nil) //nolint:errcheck
+			return err
 		}
 	}
 
@@ -643,43 +670,38 @@ func (c *BaseConnection) copyFile(virtualSourcePath, virtualTargetPath string, s
 }
 
 func (c *BaseConnection) doRecursiveCopy(virtualSourcePath, virtualTargetPath string, srcInfo os.FileInfo,
-	createTargetDir bool,
+	createTargetDir bool, recursion int,
 ) error {
 	if srcInfo.IsDir() {
+		if recursion >= util.MaxRecursion {
+			c.Log(logger.LevelError, "recursive copy failed, recursion too depth: %d", recursion)
+			return util.ErrRecursionTooDeep
+		}
+		recursion++
 		if createTargetDir {
 			if err := c.CreateDir(virtualTargetPath, false); err != nil {
 				return fmt.Errorf("unable to create directory %q: %w", virtualTargetPath, err)
 			}
 		}
-		entries, err := c.ListDir(virtualSourcePath)
+		lister, err := c.ListDir(virtualSourcePath)
 		if err != nil {
-			return fmt.Errorf("unable to get contents for dir %q: %w", virtualSourcePath, err)
+			return fmt.Errorf("unable to get lister for dir %q: %w", virtualSourcePath, err)
 		}
-		for _, info := range entries {
-			sourcePath := path.Join(virtualSourcePath, info.Name())
-			targetPath := path.Join(virtualTargetPath, info.Name())
-			targetInfo, err := c.DoStat(targetPath, 1, false)
-			if err == nil {
-				if info.IsDir() && targetInfo.IsDir() {
-					c.Log(logger.LevelDebug, "target copy dir %q already exists", targetPath)
-					continue
-				}
+		defer lister.Close()
+
+		for {
+			entries, err := lister.Next(vfs.ListerBatchSize)
+			finished := errors.Is(err, io.EOF)
+			if err != nil && !finished {
+				return fmt.Errorf("unable to get contents for dir %q: %w", virtualSourcePath, err)
 			}
-			if err != nil && !c.IsNotExistError(err) {
+			if err := c.recursiveCopyEntries(virtualSourcePath, virtualTargetPath, entries, recursion); err != nil {
 				return err
 			}
-			if err := c.checkCopy(info, targetInfo, sourcePath, targetPath); err != nil {
-				return err
-			}
-			if err := c.doRecursiveCopy(sourcePath, targetPath, info, true); err != nil {
-				if c.IsNotExistError(err) {
-					c.Log(logger.LevelInfo, "skipping copy for source path %q: %v", sourcePath, err)
-					continue
-				}
-				return err
+			if finished {
+				return nil
 			}
 		}
-		return nil
 	}
 	if !srcInfo.Mode().IsRegular() {
 		c.Log(logger.LevelInfo, "skipping copy for non regular file %q", virtualSourcePath)
@@ -687,6 +709,34 @@ func (c *BaseConnection) doRecursiveCopy(virtualSourcePath, virtualTargetPath st
 	}
 
 	return c.copyFile(virtualSourcePath, virtualTargetPath, srcInfo.Size())
+}
+
+func (c *BaseConnection) recursiveCopyEntries(virtualSourcePath, virtualTargetPath string, entries []os.FileInfo, recursion int) error {
+	for _, info := range entries {
+		sourcePath := path.Join(virtualSourcePath, info.Name())
+		targetPath := path.Join(virtualTargetPath, info.Name())
+		targetInfo, err := c.DoStat(targetPath, 1, false)
+		if err == nil {
+			if info.IsDir() && targetInfo.IsDir() {
+				c.Log(logger.LevelDebug, "target copy dir %q already exists", targetPath)
+				continue
+			}
+		}
+		if err != nil && !c.IsNotExistError(err) {
+			return err
+		}
+		if err := c.checkCopy(info, targetInfo, sourcePath, targetPath); err != nil {
+			return err
+		}
+		if err := c.doRecursiveCopy(sourcePath, targetPath, info, true, recursion); err != nil {
+			if c.IsNotExistError(err) {
+				c.Log(logger.LevelInfo, "skipping copy for source path %q: %v", sourcePath, err)
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // Copy virtualSourcePath to virtualTargetPath
@@ -734,7 +784,7 @@ func (c *BaseConnection) Copy(virtualSourcePath, virtualTargetPath string) error
 	defer close(done)
 	go keepConnectionAlive(c, done, 2*time.Minute)
 
-	return c.doRecursiveCopy(virtualSourcePath, destPath, srcInfo, createTargetDir)
+	return c.doRecursiveCopy(virtualSourcePath, destPath, srcInfo, createTargetDir, 0)
 }
 
 // Rename renames (moves) virtualSourcePath to virtualTargetPath
@@ -882,7 +932,8 @@ func (c *BaseConnection) doStatInternal(virtualPath string, mode int, checkFileP
 	convertResult bool,
 ) (os.FileInfo, error) {
 	// for some vfs we don't create intermediary folders so we cannot simply check
-	// if virtualPath is a virtual folder
+	// if virtualPath is a virtual folder. Allowing stat for hidden virtual folders
+	// is by purpose.
 	vfolders := c.User.GetVirtualFoldersInPath(path.Dir(virtualPath))
 	if _, ok := vfolders[virtualPath]; ok {
 		return vfs.NewFileInfo(virtualPath, true, 0, time.Unix(0, 0), false), nil
@@ -1103,7 +1154,7 @@ func (c *BaseConnection) checkRecursiveRenameDirPermissions(fsSrc, fsDst vfs.Fs,
 		if err != nil {
 			return c.GetFsError(fsSrc, err)
 		}
-		if walkedPath != sourcePath && vfs.HasImplicitAtomicUploads(fsSrc) && Config.RenameMode == 0 {
+		if walkedPath != sourcePath && !vfs.IsRenameAtomic(fsSrc) && Config.RenameMode == 0 {
 			c.Log(logger.LevelInfo, "cannot rename non empty directory %q on this filesystem", virtualSourcePath)
 			return c.GetOpUnsupportedError()
 		}
@@ -1150,22 +1201,24 @@ func (c *BaseConnection) checkFolderRename(fsSrc, fsDst vfs.Fs, fsSourcePath, fs
 	if util.IsDirOverlapped(virtualSourcePath, virtualTargetPath, true, "/") {
 		c.Log(logger.LevelDebug, "renaming the folder %q->%q is not supported: nested folders",
 			virtualSourcePath, virtualTargetPath)
-		return c.GetOpUnsupportedError()
+		return fmt.Errorf("nested rename %q => %q is not supported: %w",
+			virtualSourcePath, virtualTargetPath, c.GetOpUnsupportedError())
 	}
 	if util.IsDirOverlapped(fsSourcePath, fsTargetPath, true, c.User.FsConfig.GetPathSeparator()) {
 		c.Log(logger.LevelDebug, "renaming the folder %q->%q is not supported: nested fs folders",
 			fsSourcePath, fsTargetPath)
-		return c.GetOpUnsupportedError()
+		return fmt.Errorf("nested fs rename %q => %q is not supported: %w",
+			fsSourcePath, fsTargetPath, c.GetOpUnsupportedError())
 	}
 	if c.User.HasVirtualFoldersInside(virtualSourcePath) {
 		c.Log(logger.LevelDebug, "renaming the folder %q is not supported: it has virtual folders inside it",
 			virtualSourcePath)
-		return c.GetOpUnsupportedError()
+		return fmt.Errorf("folder %q has virtual folders inside it: %w", virtualSourcePath, c.GetOpUnsupportedError())
 	}
 	if c.User.HasVirtualFoldersInside(virtualTargetPath) {
 		c.Log(logger.LevelDebug, "renaming the folder %q is not supported, the target %q has virtual folders inside it",
 			virtualSourcePath, virtualTargetPath)
-		return c.GetOpUnsupportedError()
+		return fmt.Errorf("folder %q has virtual folders inside it: %w", virtualTargetPath, c.GetOpUnsupportedError())
 	}
 	if err := c.checkRecursiveRenameDirPermissions(fsSrc, fsDst, fsSourcePath, fsTargetPath,
 		virtualSourcePath, virtualTargetPath, fi); err != nil {
@@ -1179,7 +1232,7 @@ func (c *BaseConnection) isRenamePermitted(fsSrc, fsDst vfs.Fs, fsSourcePath, fs
 	virtualTargetPath string, fi os.FileInfo,
 ) bool {
 	if !c.IsSameResource(virtualSourcePath, virtualTargetPath) {
-		c.Log(logger.LevelInfo, "rename %#q->%q is not allowed: the paths must be on the same resource",
+		c.Log(logger.LevelInfo, "rename %q->%q is not allowed: the paths must be on the same resource",
 			virtualSourcePath, virtualTargetPath)
 		return false
 	}
@@ -1631,7 +1684,7 @@ func (c *BaseConnection) GetOpUnsupportedError() error {
 func getQuotaExceededError(protocol string) error {
 	switch protocol {
 	case ProtocolSFTP:
-		return fmt.Errorf("%w: %v", sftp.ErrSSHFxFailure, ErrQuotaExceeded.Error())
+		return fmt.Errorf("%w: %w", sftp.ErrSSHFxFailure, ErrQuotaExceeded)
 	case ProtocolFTP:
 		return ftpserver.ErrStorageExceeded
 	default:
@@ -1642,7 +1695,7 @@ func getQuotaExceededError(protocol string) error {
 func getReadQuotaExceededError(protocol string) error {
 	switch protocol {
 	case ProtocolSFTP:
-		return fmt.Errorf("%w: %v", sftp.ErrSSHFxFailure, ErrReadQuotaExceeded.Error())
+		return fmt.Errorf("%w: %w", sftp.ErrSSHFxFailure, ErrReadQuotaExceeded)
 	default:
 		return ErrReadQuotaExceeded
 	}
@@ -1676,29 +1729,33 @@ func (c *BaseConnection) IsQuotaExceededError(err error) bool {
 	}
 }
 
+func isSFTPGoError(err error) bool {
+	return errors.Is(err, ErrPermissionDenied) || errors.Is(err, ErrNotExist) || errors.Is(err, ErrOpUnsupported) ||
+		errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrReadQuotaExceeded) ||
+		errors.Is(err, vfs.ErrStorageSizeUnavailable) || errors.Is(err, ErrShuttingDown)
+}
+
 // GetGenericError returns an appropriate generic error for the connection protocol
 func (c *BaseConnection) GetGenericError(err error) error {
 	switch c.protocol {
 	case ProtocolSFTP:
-		if err == vfs.ErrStorageSizeUnavailable {
-			return fmt.Errorf("%w: %v", sftp.ErrSSHFxOpUnsupported, err.Error())
+		if errors.Is(err, vfs.ErrStorageSizeUnavailable) || errors.Is(err, ErrOpUnsupported) || errors.Is(err, sftp.ErrSSHFxOpUnsupported) {
+			return fmt.Errorf("%w: %w", sftp.ErrSSHFxOpUnsupported, err)
 		}
-		if err == ErrShuttingDown {
-			return fmt.Errorf("%w: %v", sftp.ErrSSHFxFailure, err.Error())
+		if isSFTPGoError(err) {
+			return fmt.Errorf("%w: %w", sftp.ErrSSHFxFailure, err)
 		}
 		if err != nil {
-			if e, ok := err.(*os.PathError); ok {
-				c.Log(logger.LevelError, "generic path error: %+v", e)
-				return fmt.Errorf("%w: %v %v", sftp.ErrSSHFxFailure, e.Op, e.Err.Error())
+			var pathError *fs.PathError
+			if errors.As(err, &pathError) {
+				c.Log(logger.LevelError, "generic path error: %+v", pathError)
+				return fmt.Errorf("%w: %v %v", sftp.ErrSSHFxFailure, pathError.Op, pathError.Err.Error())
 			}
 			c.Log(logger.LevelError, "generic error: %+v", err)
-			return fmt.Errorf("%w: %v", sftp.ErrSSHFxFailure, ErrGenericFailure.Error())
 		}
 		return sftp.ErrSSHFxFailure
 	default:
-		if err == ErrPermissionDenied || err == ErrNotExist || err == ErrOpUnsupported ||
-			err == ErrQuotaExceeded || err == ErrReadQuotaExceeded || err == vfs.ErrStorageSizeUnavailable ||
-			err == ErrShuttingDown {
+		if isSFTPGoError(err) {
 			return err
 		}
 		c.Log(logger.LevelError, "generic error: %+v", err)
@@ -1737,7 +1794,7 @@ func (c *BaseConnection) GetFsAndResolvedPath(virtualPath string) (vfs.Fs, strin
 		if c.protocol == ProtocolWebDAV && strings.Contains(err.Error(), vfs.ErrSFTPLoop.Error()) {
 			// if there is an SFTP loop we return a permission error, for WebDAV, so the problematic folder
 			// will not be listed
-			return nil, "", c.GetPermissionDeniedError()
+			return nil, "", util.NewI18nError(c.GetPermissionDeniedError(), util.I18nError403Message)
 		}
 		return nil, "", c.GetGenericError(err)
 	}
@@ -1752,6 +1809,86 @@ func (c *BaseConnection) GetFsAndResolvedPath(virtualPath string) (vfs.Fs, strin
 	}
 
 	return fs, fsPath, nil
+}
+
+// DirListerAt defines a directory lister implementing the ListAt method.
+type DirListerAt struct {
+	virtualPath string
+	user        *dataprovider.User
+	info        []os.FileInfo
+	id          string
+	protocol    string
+	mu          sync.Mutex
+	lister      vfs.DirLister
+}
+
+// Add adds the given os.FileInfo to the internal cache
+func (l *DirListerAt) Add(fi os.FileInfo) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.info = append(l.info, fi)
+}
+
+// ListAt implements sftp.ListerAt
+func (l *DirListerAt) ListAt(f []os.FileInfo, _ int64) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if len(f) == 0 {
+		return 0, errors.New("invalid ListAt destination, zero size")
+	}
+	if len(f) <= len(l.info) {
+		files := make([]os.FileInfo, 0, len(f))
+		for idx := len(l.info) - 1; idx >= 0; idx-- {
+			files = append(files, l.info[idx])
+			if len(files) == len(f) {
+				l.info = l.info[:idx]
+				n := copy(f, files)
+				return n, nil
+			}
+		}
+	}
+	limit := len(f) - len(l.info)
+	files, err := l.Next(limit)
+	n := copy(f, files)
+	return n, err
+}
+
+// Next reads the directory and returns a slice of up to n FileInfo values.
+func (l *DirListerAt) Next(limit int) ([]os.FileInfo, error) {
+	for {
+		files, err := l.lister.Next(limit)
+		if err != nil && !errors.Is(err, io.EOF) {
+			logger.Debug(l.protocol, l.id, "error retrieving directory entries: %+v", err)
+			return files, err
+		}
+		files = l.user.FilterListDir(files, l.virtualPath)
+		if len(l.info) > 0 {
+			for _, fi := range l.info {
+				files = util.PrependFileInfo(files, fi)
+			}
+			l.info = nil
+		}
+		if err != nil || len(files) > 0 {
+			return files, err
+		}
+	}
+}
+
+// Close closes the DirListerAt
+func (l *DirListerAt) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.lister.Close()
+}
+
+func (l *DirListerAt) convertError(err error) error {
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func getPermissionDeniedError(protocol string) error {

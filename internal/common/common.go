@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -42,6 +42,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/smtp"
 	"github.com/drakkan/sftpgo/v2/internal/util"
+	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
 
@@ -111,9 +112,12 @@ const (
 
 // Upload modes
 const (
-	UploadModeStandard = iota
-	UploadModeAtomic
-	UploadModeAtomicWithResume
+	UploadModeStandard              = 0
+	UploadModeAtomic                = 1
+	UploadModeAtomicWithResume      = 2
+	UploadModeS3StoreOnError        = 4
+	UploadModeGCSStoreOnError       = 8
+	UploadModeAzureBlobStoreOnError = 16
 )
 
 func init() {
@@ -150,11 +154,9 @@ var (
 	// Connections is the list of active connections
 	Connections ActiveConnections
 	// QuotaScans is the list of active quota scans
-	QuotaScans ActiveScans
-	// ActiveMetadataChecks holds the active metadata checks
-	ActiveMetadataChecks MetadataChecks
-	transfersChecker     TransfersChecker
-	supportedProtocols   = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV,
+	QuotaScans         ActiveScans
+	transfersChecker   TransfersChecker
+	supportedProtocols = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV,
 		ProtocolHTTP, ProtocolHTTPShare, ProtocolOIDC}
 	disconnHookProtocols = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP}
 	// the map key is the protocol, for each protocol we can have multiple rate limiters
@@ -167,6 +169,7 @@ var (
 func Initialize(c Configuration, isShared int) error {
 	isShuttingDown.Store(false)
 	util.SetUmask(c.Umask)
+	version.SetConfig(c.ServerVersion)
 	Config = c
 	Config.Actions.ExecuteOn = util.RemoveDuplicates(Config.Actions.ExecuteOn, true)
 	Config.Actions.ExecuteSync = util.RemoveDuplicates(Config.Actions.ExecuteSync, true)
@@ -230,6 +233,8 @@ func Initialize(c Configuration, isShared int) error {
 	vfs.SetAllowSelfConnections(c.AllowSelfConnections)
 	vfs.SetRenameMode(c.RenameMode)
 	vfs.SetReadMetadataMode(c.Metadata.Read)
+	vfs.SetResumeMaxSize(c.ResumeMaxSize)
+	vfs.SetUploadMode(c.UploadMode)
 	dataprovider.SetAllowSelfConnections(c.AllowSelfConnections)
 	transfersChecker = getTransfersChecker(isShared)
 	return nil
@@ -322,6 +327,13 @@ func Reload() error {
 	return nil
 }
 
+// DelayLogin applies the configured login delay
+func DelayLogin(err error) {
+	if Config.defender != nil {
+		Config.defender.DelayLogin(err)
+	}
+}
+
 // IsBanned returns true if the specified IP address is banned
 func IsBanned(ip, protocol string) bool {
 	if plugin.Handler.IsIPBanned(ip, protocol) {
@@ -380,13 +392,14 @@ func GetDefenderScore(ip string) (int, error) {
 	return Config.defender.GetScore(ip)
 }
 
-// AddDefenderEvent adds the specified defender event for the given IP
-func AddDefenderEvent(ip, protocol string, event HostEvent) {
+// AddDefenderEvent adds the specified defender event for the given IP.
+// Returns true if the IP is in the defender's safe list.
+func AddDefenderEvent(ip, protocol string, event HostEvent) bool {
 	if Config.defender == nil {
-		return
+		return false
 	}
 
-	Config.defender.AddEvent(ip, protocol, event)
+	return Config.defender.AddEvent(ip, protocol, event)
 }
 
 func startPeriodicChecks(duration time.Duration, isShared int) {
@@ -445,6 +458,7 @@ type ActiveConnection interface {
 	GetTransfers() []ConnectionTransfer
 	SignalTransferClose(transferID int64, err error)
 	CloseFS() error
+	isAccessAllowed() bool
 }
 
 // StatAttributes defines the attributes for set stat commands
@@ -470,24 +484,6 @@ type ConnectionTransfer struct {
 	DLSize        int64  `json:"-"`
 }
 
-func (t *ConnectionTransfer) getConnectionTransferAsString() string {
-	result := ""
-	switch t.OperationType {
-	case operationUpload:
-		result += "UL "
-	case operationDownload:
-		result += "DL "
-	}
-	result += fmt.Sprintf("%q ", t.VirtualPath)
-	if t.Size > 0 {
-		elapsed := time.Since(util.GetTimeFromMsecSinceEpoch(t.StartTime))
-		speed := float64(t.Size) / float64(util.GetTimeAsMsSinceEpoch(time.Now())-t.StartTime)
-		result += fmt.Sprintf("Size: %s Elapsed: %s Speed: \"%.1f KB/s\"", util.ByteCountIEC(t.Size),
-			util.GetDurationAsString(elapsed), speed)
-	}
-	return result
-}
-
 // MetadataConfig defines how to handle metadata for cloud storage backends
 type MetadataConfig struct {
 	// If not zero the metadata will be read before downloads and will be
@@ -509,6 +505,9 @@ type Configuration struct {
 	// 2 means atomic with resume support: as atomic but if there is an upload error the temporary
 	// file is renamed to the requested path and not deleted, this way a client can reconnect and resume
 	// the upload.
+	// 4 means files for S3 backend are stored even if a client-side upload error is detected.
+	// 8 means files for Google Cloud Storage backend are stored even if a client-side upload error is detected.
+	// 16 means files for Azure Blob backend are stored even if a client-side upload error is detected.
 	UploadMode int `json:"upload_mode" mapstructure:"upload_mode"`
 	// Actions to execute for SFTP file operations and SSH commands
 	Actions ProtocolActions `json:"actions" mapstructure:"actions"`
@@ -523,6 +522,12 @@ type Configuration struct {
 	// renames for these providers, they may be slow, there is no atomic rename API like for local
 	// filesystem, so SFTPGo will recursively list the directory contents and do a rename for each entry
 	RenameMode int `json:"rename_mode" mapstructure:"rename_mode"`
+	// ResumeMaxSize defines the maximum size allowed, in bytes, to resume uploads on storage backends
+	// with immutable objects. By default, resuming uploads is not allowed for cloud storage providers
+	// (S3, GCS, Azure Blob) because SFTPGo must rewrite the entire file.
+	// Set to a value greater than 0 to allow resuming uploads of files smaller than or equal to the
+	// defined size.
+	ResumeMaxSize int64 `json:"resume_max_size" mapstructure:"resume_max_size"`
 	// TempPath defines the path for temporary files such as those used for atomic uploads or file pipes.
 	// If you set this option you must make sure that the defined path exists, is accessible for writing
 	// by the user running SFTPGo, and is on the same filesystem as the users home directories otherwise
@@ -581,6 +586,8 @@ type Configuration struct {
 	RateLimitersConfig []RateLimiterConfig `json:"rate_limiters" mapstructure:"rate_limiters"`
 	// Umask for new uploads. Leave blank to use the system default.
 	Umask string `json:"umask" mapstructure:"umask"`
+	// Defines the server version
+	ServerVersion string `json:"server_version" mapstructure:"server_version"`
 	// Metadata configuration
 	Metadata              MetadataConfig `json:"metadata" mapstructure:"metadata"`
 	idleTimeoutAsDuration time.Duration
@@ -594,7 +601,7 @@ type Configuration struct {
 
 // IsAtomicUploadEnabled returns true if atomic upload is enabled
 func (c *Configuration) IsAtomicUploadEnabled() bool {
-	return c.UploadMode == UploadModeAtomic || c.UploadMode == UploadModeAtomicWithResume
+	return c.UploadMode&UploadModeAtomic != 0 || c.UploadMode&UploadModeAtomicWithResume != 0
 }
 
 func (c *Configuration) initializeProxyProtocol() error {
@@ -803,7 +810,8 @@ func getProxyPolicy(allowed, skipped []func(net.IP) bool, def proxyproto.Policy)
 	return func(upstream net.Addr) (proxyproto.Policy, error) {
 		upstreamIP, err := util.GetIPFromNetAddr(upstream)
 		if err != nil {
-			// something is wrong with the source IP, better reject the connection
+			// Something is wrong with the source IP, better reject the
+			// connection if a proxy header is found.
 			return proxyproto.REJECT, err
 		}
 
@@ -822,6 +830,9 @@ func getProxyPolicy(allowed, skipped []func(net.IP) bool, def proxyproto.Policy)
 			}
 		}
 
+		if def == proxyproto.REQUIRE {
+			return proxyproto.REJECT, nil
+		}
 		return def, nil
 	}
 }
@@ -1086,8 +1097,14 @@ func (conns *ActiveConnections) checkIdles() {
 		if idleTime > Config.idleTimeoutAsDuration || (isUnauthenticatedFTPUser && idleTime > Config.idleLoginTimeout) {
 			defer func(conn ActiveConnection) {
 				err := conn.Disconnect()
-				logger.Debug(conn.GetProtocol(), conn.GetID(), "close idle connection, idle time: %v, username: %q close err: %v",
+				logger.Debug(conn.GetProtocol(), conn.GetID(), "close idle connection, idle time: %s, username: %q close err: %v",
 					time.Since(conn.GetLastActivity()), conn.GetUsername(), err)
+			}(c)
+		} else if !c.isAccessAllowed() {
+			defer func(conn ActiveConnection) {
+				err := conn.Disconnect()
+				logger.Info(conn.GetProtocol(), conn.GetID(), "access conditions not met for user: %q close connection err: %v",
+					conn.GetUsername(), err)
 			}(c)
 		}
 	}
@@ -1197,9 +1214,12 @@ func (conns *ActiveConnections) IsNewConnectionAllowed(ipAddr, protocol string) 
 
 	if Config.MaxPerHostConnections > 0 {
 		if total := conns.clients.getTotalFrom(ipAddr); total > Config.MaxPerHostConnections {
-			logger.Info(logSender, "", "active connections from %s %d/%d", ipAddr, total, Config.MaxPerHostConnections)
-			AddDefenderEvent(ipAddr, protocol, HostEventLimitExceeded)
-			return ErrConnectionDenied
+			if !AddDefenderEvent(ipAddr, protocol, HostEventLimitExceeded) {
+				logger.Warn(logSender, "", "connection denied, active connections from IP %q: %d/%d",
+					ipAddr, total, Config.MaxPerHostConnections)
+				return ErrConnectionDenied
+			}
+			logger.Info(logSender, "", "active connections from safe IP %q: %d", ipAddr, total)
 		}
 	}
 
@@ -1240,6 +1260,7 @@ func (conns *ActiveConnections) GetStats(role string) []ConnectionStatus {
 				RemoteAddress:  c.GetRemoteAddress(),
 				ConnectionTime: util.GetTimeAsMsSinceEpoch(c.GetConnectionTime()),
 				LastActivity:   util.GetTimeAsMsSinceEpoch(c.GetLastActivity()),
+				CurrentTime:    util.GetTimeAsMsSinceEpoch(time.Now()),
 				Protocol:       c.GetProtocol(),
 				Command:        c.GetCommand(),
 				Transfers:      c.GetTransfers(),
@@ -1265,6 +1286,8 @@ type ConnectionStatus struct {
 	ConnectionTime int64 `json:"connection_time"`
 	// Last activity as unix timestamp in milliseconds
 	LastActivity int64 `json:"last_activity"`
+	// Current time as unix timestamp in milliseconds
+	CurrentTime int64 `json:"current_time"`
 	// Protocol for this connection
 	Protocol string `json:"protocol"`
 	// active uploads/downloads
@@ -1273,45 +1296,6 @@ type ConnectionStatus struct {
 	Command string `json:"command,omitempty"`
 	// Node identifier, omitted for single node installations
 	Node string `json:"node,omitempty"`
-}
-
-// GetConnectionDuration returns the connection duration as string
-func (c *ConnectionStatus) GetConnectionDuration() string {
-	elapsed := time.Since(util.GetTimeFromMsecSinceEpoch(c.ConnectionTime))
-	return util.GetDurationAsString(elapsed)
-}
-
-// GetConnectionInfo returns connection info.
-// Protocol,Client Version and RemoteAddress are returned.
-func (c *ConnectionStatus) GetConnectionInfo() string {
-	var result strings.Builder
-
-	result.WriteString(fmt.Sprintf("%v. Client: %q From: %q", c.Protocol, c.ClientVersion, c.RemoteAddress))
-
-	if c.Command == "" {
-		return result.String()
-	}
-
-	switch c.Protocol {
-	case ProtocolSSH, ProtocolFTP:
-		result.WriteString(fmt.Sprintf(". Command: %q", c.Command))
-	case ProtocolWebDAV:
-		result.WriteString(fmt.Sprintf(". Method: %q", c.Command))
-	}
-
-	return result.String()
-}
-
-// GetTransfersAsString returns the active transfers as string
-func (c *ConnectionStatus) GetTransfersAsString() string {
-	result := ""
-	for _, t := range c.Transfers {
-		if result != "" {
-			result += ". "
-		}
-		result += t.getConnectionTransferAsString()
-	}
-	return result
 }
 
 // ActiveQuotaScan defines an active quota scan for a user
@@ -1431,77 +1415,6 @@ func (s *ActiveScans) RemoveVFolderQuotaScan(folderName string) bool {
 			lastIdx := len(s.FolderScans) - 1
 			s.FolderScans[idx] = s.FolderScans[lastIdx]
 			s.FolderScans = s.FolderScans[:lastIdx]
-			return true
-		}
-	}
-
-	return false
-}
-
-// MetadataCheck defines an active metadata check
-type MetadataCheck struct {
-	// Username to which the metadata check refers
-	Username string `json:"username"`
-	// check start time as unix timestamp in milliseconds
-	StartTime int64  `json:"start_time"`
-	Role      string `json:"-"`
-}
-
-// MetadataChecks holds the active metadata checks
-type MetadataChecks struct {
-	sync.RWMutex
-	checks []MetadataCheck
-}
-
-// Get returns the active metadata checks
-func (c *MetadataChecks) Get(role string) []MetadataCheck {
-	c.RLock()
-	defer c.RUnlock()
-
-	checks := make([]MetadataCheck, 0, len(c.checks))
-	for _, check := range c.checks {
-		if role == "" || role == check.Role {
-			checks = append(checks, MetadataCheck{
-				Username:  check.Username,
-				StartTime: check.StartTime,
-			})
-		}
-	}
-
-	return checks
-}
-
-// Add adds a user to the ones with active metadata checks.
-// Return false if a metadata check is already active for the specified user
-func (c *MetadataChecks) Add(username, role string) bool {
-	c.Lock()
-	defer c.Unlock()
-
-	for idx := range c.checks {
-		if c.checks[idx].Username == username {
-			return false
-		}
-	}
-
-	c.checks = append(c.checks, MetadataCheck{
-		Username:  username,
-		StartTime: util.GetTimeAsMsSinceEpoch(time.Now()),
-		Role:      role,
-	})
-
-	return true
-}
-
-// Remove removes a user from the ones with active metadata checks
-func (c *MetadataChecks) Remove(username string) bool {
-	c.Lock()
-	defer c.Unlock()
-
-	for idx := range c.checks {
-		if c.checks[idx].Username == username {
-			lastIdx := len(c.checks) - 1
-			c.checks[idx] = c.checks[lastIdx]
-			c.checks = c.checks[:lastIdx]
 			return true
 		}
 	}

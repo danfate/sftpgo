@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -248,7 +248,7 @@ func (c *Config) loadTemplates(configDir string) error {
 	return nil
 }
 
-// Initialize initialized and validates the SMTP configuration
+// Initialize initializes and validates the SMTP configuration
 func (c *Config) Initialize(configDir string, isService bool) error {
 	if !isService && c.Host == "" {
 		if err := loadConfigFromProvider(); err != nil {
@@ -257,8 +257,11 @@ func (c *Config) Initialize(configDir string, isService bool) error {
 		if !config.isEnabled() {
 			return nil
 		}
+		// If not running as a service, templates will only be loaded if required.
 		return c.loadTemplates(configDir)
 	}
+	// In service mode SMTP can be enabled from the WebAdmin at runtime so we
+	// always load templates.
 	if err := c.loadTemplates(configDir); err != nil {
 		return err
 	}
@@ -276,15 +279,15 @@ func (c *Config) Initialize(configDir string, isService bool) error {
 }
 
 func (c *Config) getMailClientOptions() []mail.Option {
-	options := []mail.Option{mail.WithPort(c.Port), mail.WithoutNoop()}
+	options := []mail.Option{mail.WithoutNoop()}
 
 	switch c.Encryption {
 	case 1:
-		options = append(options, mail.WithSSL())
+		options = append(options, mail.WithSSLPort(false))
 	case 2:
-		options = append(options, mail.WithTLSPolicy(mail.TLSMandatory))
+		options = append(options, mail.WithTLSPortPolicy(mail.TLSMandatory))
 	default:
-		options = append(options, mail.WithTLSPolicy(mail.NoTLS))
+		options = append(options, mail.WithTLSPortPolicy(mail.NoTLS))
 	}
 	if c.User != "" {
 		options = append(options, mail.WithUsername(c.User))
@@ -314,14 +317,14 @@ func (c *Config) getMailClientOptions() []mail.Option {
 			}),
 			mail.WithDebugLog())
 	}
+	options = append(options, mail.WithPort(c.Port))
 	return options
 }
 
 func (c *Config) getSMTPClientAndMsg(to, bcc []string, subject, body string, contentType EmailContentType,
 	attachments ...*mail.File) (*mail.Client, *mail.Msg, error) {
-	version := version.Get()
 	msg := mail.NewMsg()
-	msg.SetUserAgent(fmt.Sprintf("SFTPGo-%s-%s", version.Version, version.CommitHash))
+	msg.SetUserAgent(version.GetServerVersion(" ", false))
 
 	var from string
 	if c.From != "" {

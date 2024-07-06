@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -44,6 +44,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unsafe"
 
 	"github.com/google/uuid"
 	"github.com/lithammer/shortuuid/v3"
@@ -54,8 +55,9 @@ import (
 )
 
 const (
-	logSender = "util"
-	osWindows = "windows"
+	logSender    = "util"
+	osWindows    = "windows"
+	pubKeySuffix = ".pub"
 )
 
 var (
@@ -65,6 +67,12 @@ var (
 	// CertsBasePath defines base path for certificates obtained using the built-in ACME protocol.
 	// It is empty is ACME support is disabled
 	CertsBasePath string
+	// Defines the TLS ciphers used by default for TLS 1.0-1.2 if no preference is specified.
+	defaultTLSCiphers = []uint16{
+		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+	}
 )
 
 // IEC Sizes.
@@ -281,6 +289,30 @@ func ParseBytes(s string) (int64, error) {
 	return 0, fmt.Errorf("unhandled size name: %v", extra)
 }
 
+// BytesToString converts []byte to string without allocations.
+// https://github.com/kubernetes/kubernetes/blob/e4b74dd12fa8cb63c174091d5536a10b8ec19d34/staging/src/k8s.io/apiserver/pkg/authentication/token/cache/cached_token_authenticator.go#L278
+// Use only if strictly required, this method uses unsafe.
+func BytesToString(b []byte) string {
+	// unsafe.SliceData relies on cap whereas we want to rely on len
+	if len(b) == 0 {
+		return ""
+	}
+	// https://github.com/golang/go/blob/4ed358b57efdad9ed710be7f4fc51495a7620ce2/src/strings/builder.go#L41
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
+
+// StringToBytes convert string to []byte without allocations.
+// https://github.com/kubernetes/kubernetes/blob/e4b74dd12fa8cb63c174091d5536a10b8ec19d34/staging/src/k8s.io/apiserver/pkg/authentication/token/cache/cached_token_authenticator.go#L289
+// Use only if strictly required, this method uses unsafe.
+func StringToBytes(s string) []byte {
+	// unsafe.StringData is unspecified for the empty string, so we provide a strict interpretation
+	if s == "" {
+		return nil
+	}
+	// https://github.com/golang/go/blob/4ed358b57efdad9ed710be7f4fc51495a7620ce2/src/os/file.go#L300
+	return unsafe.Slice(unsafe.StringData(s), len(s))
+}
+
 // GetIPFromRemoteAddress returns the IP from the remote address.
 // If the given remote address cannot be parsed it will be returned unchanged
 func GetIPFromRemoteAddress(remoteAddress string) string {
@@ -336,7 +368,7 @@ func GetIntFromPointer(val *int64) int64 {
 // GetTimeFromPointer returns the time value or now
 func GetTimeFromPointer(val *time.Time) time.Time {
 	if val == nil {
-		return time.Now()
+		return time.Unix(0, 0)
 	}
 	return *val
 }
@@ -348,7 +380,7 @@ func GenerateRSAKeys(file string) error {
 	if err := createDirPathIfMissing(file, 0700); err != nil {
 		return err
 	}
-	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	key, err := rsa.GenerateKey(rand.Reader, 3072)
 	if err != nil {
 		return err
 	}
@@ -372,7 +404,7 @@ func GenerateRSAKeys(file string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+pubKeySuffix, ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
 // GenerateECDSAKeys generate ecdsa private and public keys and write the
@@ -410,7 +442,7 @@ func GenerateECDSAKeys(file string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+pubKeySuffix, ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
 // GenerateEd25519Keys generate ed25519 private and public keys and write the
@@ -442,7 +474,7 @@ func GenerateEd25519Keys(file string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(file+".pub", ssh.MarshalAuthorizedKey(pub), 0600)
+	return os.WriteFile(file+pubKeySuffix, ssh.MarshalAuthorizedKey(pub), 0600)
 }
 
 // IsDirOverlapped returns true if dir1 and dir2 overlap
@@ -575,13 +607,19 @@ func HTTPListenAndServe(srv *http.Server, address string, port int, isTLS bool, 
 		if !IsFileInputValid(address) {
 			return fmt.Errorf("invalid socket address %q", address)
 		}
-		err = createDirPathIfMissing(address, os.ModePerm)
+		err = createDirPathIfMissing(address, 0770)
 		if err != nil {
 			logger.ErrorToConsole("error creating Unix-domain socket parent dir: %v", err)
 			logger.Error(logSender, "", "error creating Unix-domain socket parent dir: %v", err)
 		}
 		os.Remove(address)
 		listener, err = newListener("unix", address, srv.ReadTimeout, srv.WriteTimeout)
+		if err == nil {
+			// should a chmod err be fatal?
+			if errChmod := os.Chmod(address, 0770); errChmod != nil {
+				logger.Warn(logSender, "", "unable to set the Unix-domain socket group writable: %v", errChmod)
+			}
+		}
 	} else {
 		CheckTCP4Port(port)
 		listener, err = newListener("tcp", fmt.Sprintf("%s:%d", address, port), srv.ReadTimeout, srv.WriteTimeout)
@@ -612,7 +650,29 @@ func GetTLSCiphersFromNames(cipherNames []string) []uint16 {
 		}
 	}
 
+	if len(ciphers) == 0 {
+		// return a secure default
+		return defaultTLSCiphers
+	}
+
 	return ciphers
+}
+
+// GetALPNProtocols returns the ALPN protocols, any invalid protocol will be
+// silently ignored. If no protocol or no valid protocol is provided the default
+// is http/1.1, h2
+func GetALPNProtocols(protocols []string) []string {
+	var result []string
+	for _, p := range protocols {
+		switch p {
+		case "http/1.1", "h2":
+			result = append(result, p)
+		}
+	}
+	if len(result) == 0 {
+		return []string{"http/1.1", "h2"}
+	}
+	return result
 }
 
 // EncodeTLSCertToPem returns the specified certificate PEM encoded.
@@ -625,7 +685,7 @@ func EncodeTLSCertToPem(tlsCert *x509.Certificate) (string, error) {
 		Type:  "CERTIFICATE",
 		Bytes: tlsCert.Raw,
 	}
-	return string(pem.EncodeToMemory(&publicKeyBlock)), nil
+	return BytesToString(pem.EncodeToMemory(&publicKeyBlock)), nil
 }
 
 // CheckTCP4Port quits the app if bind on the given IPv4 port fails.
@@ -669,7 +729,7 @@ func GetSSHPublicKeyAsString(pubKey []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(ssh.MarshalAuthorizedKey(k)), nil
+	return BytesToString(ssh.MarshalAuthorizedKey(k)), nil
 }
 
 // GetRealIP returns the ip address as result of parsing the specified
@@ -845,5 +905,26 @@ func JSONEscape(val string) string {
 	if err != nil {
 		return ""
 	}
-	return string(b[1 : len(b)-1])
+	return BytesToString(b[1 : len(b)-1])
+}
+
+// ReadConfigFromFile reads a configuration parameter from the specified file
+func ReadConfigFromFile(name, configDir string) (string, error) {
+	if !IsFileInputValid(name) {
+		return "", fmt.Errorf("invalid file input: %q", name)
+	}
+	if configDir == "" {
+		if !filepath.IsAbs(name) {
+			return "", fmt.Errorf("%q must be an absolute file path", name)
+		}
+	} else {
+		if name != "" && !filepath.IsAbs(name) {
+			name = filepath.Join(configDir, name)
+		}
+	}
+	val, err := os.ReadFile(name)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(BytesToString(val)), nil
 }

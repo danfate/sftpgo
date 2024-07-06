@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -314,7 +314,7 @@ func TestTransferCheckerTransferQuota(t *testing.T) {
 	transfer1.BytesReceived.Store(1024*1024 + 1)
 	transfer2.BytesReceived.Store(0)
 	Connections.checkTransfers()
-	assert.True(t, conn1.IsQuotaExceededError(transfer1.errAbort))
+	assert.True(t, conn1.IsQuotaExceededError(transfer1.errAbort), transfer1.errAbort)
 	assert.Nil(t, transfer2.errAbort)
 	transfer1.errAbort = nil
 	transfer1.BytesReceived.Store(1024*1024 + 1)

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -64,12 +64,6 @@ type OsFs struct {
 
 // NewOsFs returns an OsFs object that allows to interact with local Os filesystem
 func NewOsFs(connectionID, rootDir, mountPath string, config *sdk.OSFsConfig) Fs {
-	var tempDir string
-	if tempPath != "" {
-		tempDir = tempPath
-	} else {
-		tempDir = filepath.Clean(os.TempDir())
-	}
 	var readBufferSize, writeBufferSize int
 	if config != nil {
 		readBufferSize = config.ReadBufferSize * 1024 * 1024
@@ -80,7 +74,7 @@ func NewOsFs(connectionID, rootDir, mountPath string, config *sdk.OSFsConfig) Fs
 		connectionID:    connectionID,
 		rootDir:         rootDir,
 		mountPath:       getMountPath(mountPath),
-		localTempDir:    tempDir,
+		localTempDir:    getLocalTempDir(),
 		readBufferSize:  readBufferSize,
 		writeBufferSize: writeBufferSize,
 	}
@@ -107,7 +101,7 @@ func (fs *OsFs) Lstat(name string) (os.FileInfo, error) {
 }
 
 // Open opens the named file for reading
-func (fs *OsFs) Open(name string, offset int64) (File, *PipeReader, func(), error) {
+func (fs *OsFs) Open(name string, offset int64) (File, PipeReader, func(), error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return nil, nil, nil, err
@@ -140,7 +134,7 @@ func (fs *OsFs) Open(name string, offset int64) (File, *PipeReader, func(), erro
 }
 
 // Create creates or opens the named file for writing
-func (fs *OsFs) Create(name string, flag, _ int) (File, *PipeWriter, func(), error) {
+func (fs *OsFs) Create(name string, flag, _ int) (File, PipeWriter, func(), error) {
 	if !fs.useWriteBuffering(flag) {
 		var err error
 		var f *os.File
@@ -196,7 +190,7 @@ func (fs *OsFs) Rename(source, target string) (int, int64, error) {
 		}
 
 		err = fscopy.Copy(source, target, fscopy.Options{
-			OnSymlink: func(src string) fscopy.SymlinkAction {
+			OnSymlink: func(_ string) fscopy.SymlinkAction {
 				return fscopy.Skip
 			},
 			CopyBufferSize: readBufferSize,
@@ -264,7 +258,7 @@ func (*OsFs) Truncate(name string, size int64) error {
 
 // ReadDir reads the directory named by dirname and returns
 // a list of directory entries.
-func (*OsFs) ReadDir(dirname string) ([]os.FileInfo, error) {
+func (*OsFs) ReadDir(dirname string) (DirLister, error) {
 	f, err := os.Open(dirname)
 	if err != nil {
 		if isInvalidNameError(err) {
@@ -272,16 +266,17 @@ func (*OsFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 		}
 		return nil, err
 	}
-	list, err := f.Readdir(-1)
-	f.Close()
-	if err != nil {
-		return nil, err
-	}
-	return list, nil
+	return &osFsDirLister{f}, nil
 }
 
 // IsUploadResumeSupported returns true if resuming uploads is supported
 func (*OsFs) IsUploadResumeSupported() bool {
+	return true
+}
+
+// IsConditionalUploadResumeSupported returns if resuming uploads is supported
+// for the specified size
+func (*OsFs) IsConditionalUploadResumeSupported(_ int64) bool {
 	return true
 }
 
@@ -600,4 +595,19 @@ func (fs *OsFs) useWriteBuffering(flag int) bool {
 		return false
 	}
 	return true
+}
+
+type osFsDirLister struct {
+	f *os.File
+}
+
+func (l *osFsDirLister) Next(limit int) ([]os.FileInfo, error) {
+	if limit <= 0 {
+		return nil, errInvalidDirListerLimit
+	}
+	return l.f.Readdir(limit)
+}
+
+func (l *osFsDirLister) Close() error {
+	return l.f.Close()
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -105,7 +105,6 @@ func (o *memoryOAuth2Manager) getPendingAuth(state string) (oauth2PendingAuth, e
 }
 
 func (o *memoryOAuth2Manager) cleanup() {
-	logger.Debug(logSender, "", "oauth2 manager cleanup")
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -165,6 +164,5 @@ func (o *dbOAuth2Manager) decodePendingAuthData(data any) (oauth2PendingAuth, er
 }
 
 func (o *dbOAuth2Manager) cleanup() {
-	logger.Debug(logSender, "", "oauth2 manager cleanup")
 	dataprovider.CleanupSharedSessions(dataprovider.SessionTypeOAuth2Auth, time.Now()) //nolint:errcheck
 }

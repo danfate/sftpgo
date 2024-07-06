@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [2.6.x]
   pull_request:
 
 jobs:
@@ -11,11 +11,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        go: ['1.21']
+        go: ['1.22']
         os: [ubuntu-latest, macos-latest]
         upload-coverage: [true]
         include:
-          - go: '1.21'
+          - go: '1.22'
             os: windows-latest
             upload-coverage: false
 
@@ -25,7 +25,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
 
@@ -83,10 +83,11 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: ${{ matrix.upload-coverage }}
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           file: ./coverage.txt
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Run test cases using bolt provider
         run: |
@@ -177,21 +178,21 @@ jobs:
 
       - name: Upload Windows installer x86_64 artifact
         if: ${{ startsWith(matrix.os, 'windows-') && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sftpgo_windows_installer_x86_64
           path: ./sftpgo_windows_x86_64.exe
 
       - name: Upload Windows installer arm64 artifact
         if: ${{ startsWith(matrix.os, 'windows-') && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sftpgo_windows_installer_arm64
           path: ./sftpgo_windows_arm64.exe
 
       - name: Upload Windows installer x86 artifact
         if: ${{ startsWith(matrix.os, 'windows-') && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sftpgo_windows_installer_x86
           path: ./sftpgo_windows_x86.exe
@@ -217,7 +218,7 @@ jobs:
 
       - name: Upload build artifact
         if: startsWith(matrix.os, 'ubuntu-') != true
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sftpgo-${{ matrix.os }}-go-${{ matrix.go }}
           path: output
@@ -230,9 +231,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.22'
 
       - name: Build
         run: |
@@ -294,9 +295,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.22'
 
       - name: Build
         run: |
@@ -484,7 +485,7 @@ jobs:
             cp sftpgo output/
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sftpgo-linux-${{ matrix.arch }}-go-${{ matrix.go }}
           path: output
@@ -499,13 +500,13 @@ jobs:
           echo "pkg-version=${PKG_VERSION}" >> $GITHUB_OUTPUT
 
       - name: Upload Debian Package
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-${{ matrix.go-arch }}-deb
           path: pkgs/dist/deb/*
 
       - name: Upload RPM Package
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sftpgo-${{ steps.build_linux_pkgs.outputs.pkg-version }}-${{ matrix.go-arch }}-rpm
           path: pkgs/dist/rpm/*
@@ -515,11 +516,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.22'
       - uses: actions/checkout@v4
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v3
+        uses: golangci/golangci-lint-action@v6
         with:
           version: latest

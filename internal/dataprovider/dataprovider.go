@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -29,6 +30,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"hash"
@@ -147,14 +149,20 @@ const (
 	DumpScopeConfigs = "configs"
 )
 
+const (
+	fieldUsername = 1
+	fieldName     = 2
+	fieldIPNet    = 3
+)
+
 var (
 	// SupportedProviders defines the supported data providers
 	SupportedProviders = []string{SQLiteDataProviderName, PGSQLDataProviderName, MySQLDataProviderName,
 		BoltDataProviderName, MemoryDataProviderName, CockroachDataProviderName}
 	// ValidPerms defines all the valid permissions for a user
 	ValidPerms = []string{PermAny, PermListItems, PermDownload, PermUpload, PermOverwrite, PermCreateDirs, PermRename,
-		PermRenameFiles, PermRenameDirs, PermDelete, PermDeleteFiles, PermDeleteDirs, PermCreateSymlinks, PermChmod,
-		PermChown, PermChtimes}
+		PermRenameFiles, PermRenameDirs, PermDelete, PermDeleteFiles, PermDeleteDirs, PermCopy, PermCreateSymlinks,
+		PermChmod, PermChown, PermChtimes}
 	// ValidLoginMethods defines all the valid login methods
 	ValidLoginMethods = []string{SSHLoginMethodPublicKey, LoginMethodPassword, SSHLoginMethodPassword,
 		SSHLoginMethodKeyboardInteractive, SSHLoginMethodKeyAndPassword, SSHLoginMethodKeyAndKeyboardInt,
@@ -175,13 +183,17 @@ var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	// ErrLoginNotAllowedFromIP defines the error to return if login is denied from the current IP
 	ErrLoginNotAllowedFromIP = errors.New("login is not allowed from this IP")
-	isAdminCreated           atomic.Bool
-	validTLSUsernames        = []string{string(sdk.TLSUsernameNone), string(sdk.TLSUsernameCN)}
-	config                   Config
-	provider                 Provider
-	sqlPlaceholders          []string
-	internalHashPwdPrefixes  = []string{argonPwdPrefix, bcryptPwdPrefix}
-	hashPwdPrefixes          = []string{argonPwdPrefix, bcryptPwdPrefix, pbkdf2SHA1Prefix, pbkdf2SHA256Prefix,
+	// ErrDuplicatedKey occurs when there is a unique key constraint violation
+	ErrDuplicatedKey = errors.New("duplicated key not allowed")
+	// ErrForeignKeyViolated occurs when there is a foreign key constraint violation
+	ErrForeignKeyViolated   = errors.New("violates foreign key constraint")
+	isAdminCreated          atomic.Bool
+	validTLSUsernames       = []string{string(sdk.TLSUsernameNone), string(sdk.TLSUsernameCN)}
+	config                  Config
+	provider                Provider
+	sqlPlaceholders         []string
+	internalHashPwdPrefixes = []string{argonPwdPrefix, bcryptPwdPrefix}
+	hashPwdPrefixes         = []string{argonPwdPrefix, bcryptPwdPrefix, pbkdf2SHA1Prefix, pbkdf2SHA256Prefix,
 		pbkdf2SHA512Prefix, pbkdf2SHA256B64SaltPrefix, md5cryptPwdPrefix, md5cryptApr1PwdPrefix, md5DigestPwdPrefix,
 		sha256DigestPwdPrefix, sha512DigestPwdPrefix, sha256cryptPwdPrefix, sha512cryptPwdPrefix, yescryptPwdPrefix}
 	pbkdfPwdPrefixes        = []string{pbkdf2SHA1Prefix, pbkdf2SHA256Prefix, pbkdf2SHA512Prefix, pbkdf2SHA256B64SaltPrefix}
@@ -976,11 +988,29 @@ func GetBackupsPath() string {
 	return config.BackupsPath
 }
 
+// GetProviderFromValue returns the FilesystemProvider matching the specified value.
+// If no match is found LocalFilesystemProvider is returned.
+func GetProviderFromValue(value string) sdk.FilesystemProvider {
+	val, err := strconv.Atoi(value)
+	if err != nil {
+		return sdk.LocalFilesystemProvider
+	}
+	result := sdk.FilesystemProvider(val)
+	if sdk.IsProviderSupported(result) {
+		return result
+	}
+	return sdk.LocalFilesystemProvider
+}
+
 func initializeHashingAlgo(cnf *Config) error {
+	parallelism := cnf.PasswordHashing.Argon2Options.Parallelism
+	if parallelism == 0 {
+		parallelism = uint8(runtime.NumCPU())
+	}
 	argon2Params = &argon2id.Params{
 		Memory:      cnf.PasswordHashing.Argon2Options.Memory,
 		Iterations:  cnf.PasswordHashing.Argon2Options.Iterations,
-		Parallelism: cnf.PasswordHashing.Argon2Options.Parallelism,
+		Parallelism: parallelism,
 		SaltLength:  16,
 		KeyLength:   32,
 	}
@@ -1164,7 +1194,7 @@ func CheckCompositeCredentials(username, password, ip, loginMethod, protocol str
 	if err != nil {
 		return user, loginMethod, err
 	}
-	if !user.IsTLSUsernameVerificationEnabled() {
+	if !user.IsTLSVerificationEnabled() {
 		// for backward compatibility with 2.0.x we only check the password and change the login method here
 		// in future updates we have to return an error
 		user, err := CheckUserAndPass(username, password, ip, protocol)
@@ -1312,7 +1342,9 @@ func CheckUserAndPubKey(username string, pubKey []byte, ip, protocol string, isS
 
 // CheckKeyboardInteractiveAuth checks the keyboard interactive authentication and returns
 // the authenticated user or an error
-func CheckKeyboardInteractiveAuth(username, authHook string, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (User, error) {
+func CheckKeyboardInteractiveAuth(username, authHook string, client ssh.KeyboardInteractiveChallenge,
+	ip, protocol string, isPartialAuth bool,
+) (User, error) {
 	var user User
 	var err error
 	username = config.convertName(username)
@@ -1328,7 +1360,7 @@ func CheckKeyboardInteractiveAuth(username, authHook string, client ssh.Keyboard
 	if err != nil {
 		return user, err
 	}
-	return doKeyboardInteractiveAuth(&user, authHook, client, ip, protocol)
+	return doKeyboardInteractiveAuth(&user, authHook, client, ip, protocol, isPartialAuth)
 }
 
 // GetFTPPreAuthUser returns the SFTPGo user with the specified username
@@ -2519,9 +2551,8 @@ func Close() error {
 }
 
 func createProvider(basePath string) error {
-	var err error
 	sqlPlaceholders = getSQLPlaceholders()
-	if err = validateSQLTablesPrefix(); err != nil {
+	if err := validateSQLTablesPrefix(); err != nil {
 		return err
 	}
 	logSender = fmt.Sprintf("dataprovider_%v", config.Driver)
@@ -2536,7 +2567,11 @@ func createProvider(basePath string) error {
 	case BoltDataProviderName:
 		return initializeBoltProvider(basePath)
 	case MemoryDataProviderName:
-		initializeMemoryProvider(basePath)
+		if err := initializeMemoryProvider(basePath); err != nil {
+			msg := fmt.Sprintf("provider initialized but data loading failed: %v", err)
+			logger.Warn(logSender, "", msg)
+			logger.WarnToConsole(msg)
+		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported data provider: %v", config.Driver)
@@ -2575,6 +2610,8 @@ func copyBaseUserFilters(in sdk.BaseUserFilters) sdk.BaseUserFilters {
 	filters.PasswordStrength = in.PasswordStrength
 	filters.WebClient = make([]string, len(in.WebClient))
 	copy(filters.WebClient, in.WebClient)
+	filters.TLSCerts = make([]string, len(in.TLSCerts))
+	copy(filters.TLSCerts, in.TLSCerts)
 	filters.BandwidthLimits = make([]sdk.BandwidthLimit, 0, len(in.BandwidthLimits))
 	for _, limit := range in.BandwidthLimits {
 		bwLimit := sdk.BandwidthLimit{
@@ -2585,6 +2622,14 @@ func copyBaseUserFilters(in sdk.BaseUserFilters) sdk.BaseUserFilters {
 		bwLimit.Sources = make([]string, len(limit.Sources))
 		copy(bwLimit.Sources, limit.Sources)
 		filters.BandwidthLimits = append(filters.BandwidthLimits, bwLimit)
+	}
+	filters.AccessTime = make([]sdk.TimePeriod, 0, len(in.AccessTime))
+	for _, period := range in.AccessTime {
+		filters.AccessTime = append(filters.AccessTime, sdk.TimePeriod{
+			DayOfWeek: period.DayOfWeek,
+			From:      period.From,
+			To:        period.To,
+		})
 	}
 	return filters
 }
@@ -2610,14 +2655,23 @@ func buildUserHomeDir(user *User) {
 
 func validateFolderQuotaLimits(folder vfs.VirtualFolder) error {
 	if folder.QuotaSize < -1 {
-		return util.NewValidationError(fmt.Sprintf("invalid quota_size: %v folder path %q", folder.QuotaSize, folder.MappedPath))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("invalid quota_size: %v folder path %q", folder.QuotaSize, folder.MappedPath)),
+			util.I18nErrorFolderQuotaSizeInvalid,
+		)
 	}
 	if folder.QuotaFiles < -1 {
-		return util.NewValidationError(fmt.Sprintf("invalid quota_file: %v folder path %q", folder.QuotaFiles, folder.MappedPath))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("invalid quota_file: %v folder path %q", folder.QuotaFiles, folder.MappedPath)),
+			util.I18nErrorFolderQuotaFileInvalid,
+		)
 	}
 	if (folder.QuotaSize == -1 && folder.QuotaFiles != -1) || (folder.QuotaFiles == -1 && folder.QuotaSize != -1) {
-		return util.NewValidationError(fmt.Sprintf("virtual folder quota_size and quota_files must be both -1 or >= 0, quota_size: %v quota_files: %v",
-			folder.QuotaFiles, folder.QuotaSize))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("virtual folder quota_size and quota_files must be both -1 or >= 0, quota_size: %v quota_files: %v",
+				folder.QuotaFiles, folder.QuotaSize)),
+			util.I18nErrorFolderQuotaInvalid,
+		)
 	}
 	return nil
 }
@@ -2635,12 +2689,18 @@ func validateUserGroups(user *User) error {
 		}
 		if g.Type == sdk.GroupTypePrimary {
 			if hasPrimary {
-				return util.NewValidationError("only one primary group is allowed")
+				return util.NewI18nError(
+					util.NewValidationError("only one primary group is allowed"),
+					util.I18nErrorPrimaryGroup,
+				)
 			}
 			hasPrimary = true
 		}
 		if groupNames[g.Name] {
-			return util.NewValidationError(fmt.Sprintf("the group %q is duplicated", g.Name))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("the group %q is duplicated", g.Name)),
+				util.I18nErrorDuplicateGroup,
+			)
 		}
 		groupNames[g.Name] = true
 	}
@@ -2656,22 +2716,31 @@ func validateAssociatedVirtualFolders(vfolders []vfs.VirtualFolder) ([]vfs.Virtu
 
 	for _, v := range vfolders {
 		if v.VirtualPath == "" {
-			return nil, util.NewValidationError("mount/virtual path is mandatory")
+			return nil, util.NewI18nError(
+				util.NewValidationError("mount/virtual path is mandatory"),
+				util.I18nErrorFolderMountPathRequired,
+			)
 		}
 		cleanedVPath := util.CleanPath(v.VirtualPath)
 		if err := validateFolderQuotaLimits(v); err != nil {
 			return nil, err
 		}
 		if v.Name == "" {
-			return nil, util.NewValidationError("folder name is mandatory")
+			return nil, util.NewI18nError(util.NewValidationError("folder name is mandatory"), util.I18nErrorFolderNameRequired)
 		}
 		if folderNames[v.Name] {
-			return nil, util.NewValidationError(fmt.Sprintf("the folder %q is duplicated", v.Name))
+			return nil, util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("the folder %q is duplicated", v.Name)),
+				util.I18nErrorDuplicatedFolders,
+			)
 		}
 		for _, vFolder := range virtualFolders {
 			if util.IsDirOverlapped(vFolder.VirtualPath, cleanedVPath, false, "/") {
-				return nil, util.NewValidationError(fmt.Sprintf("invalid virtual folder %q, it overlaps with virtual folder %q",
-					v.VirtualPath, vFolder.VirtualPath))
+				return nil, util.NewI18nError(
+					util.NewValidationError(fmt.Sprintf("invalid virtual folder %q, it overlaps with virtual folder %q",
+						v.VirtualPath, vFolder.VirtualPath)),
+					util.I18nErrorOverlappedFolders,
+				)
 			}
 		}
 		virtualFolders = append(virtualFolders, vfs.VirtualFolder{
@@ -2772,14 +2841,14 @@ func validateUserPermissions(permsToCheck map[string][]string) (map[string][]str
 
 func validatePermissions(user *User) error {
 	if len(user.Permissions) == 0 {
-		return util.NewValidationError("please grant some permissions to this user")
+		return util.NewI18nError(util.NewValidationError("please grant some permissions to this user"), util.I18nErrorNoPermission)
 	}
 	if _, ok := user.Permissions["/"]; !ok {
-		return util.NewValidationError("permissions for the root dir \"/\" must be set")
+		return util.NewI18nError(util.NewValidationError("permissions for the root dir \"/\" must be set"), util.I18nErrorNoRootPermission)
 	}
 	permissions, err := validateUserPermissions(user.Permissions)
 	if err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nErrorGenericPermission)
 	}
 	user.Permissions = permissions
 	return nil
@@ -2790,15 +2859,32 @@ func validatePublicKeys(user *User) error {
 		user.PublicKeys = []string{}
 	}
 	var validatedKeys []string
-	for i, k := range user.PublicKeys {
-		if k == "" {
+	for idx, key := range user.PublicKeys {
+		if key == "" {
 			continue
 		}
-		_, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k))
+		out, _, _, _, err := ssh.ParseAuthorizedKey([]byte(key))
 		if err != nil {
-			return util.NewValidationError(fmt.Sprintf("could not parse key nr. %d: %s", i+1, err))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("error parsing public key at position %d: %v", idx, err)),
+				util.I18nErrorPubKeyInvalid,
+			)
 		}
-		validatedKeys = append(validatedKeys, k)
+		if k, ok := out.(ssh.CryptoPublicKey); ok {
+			cryptoKey := k.CryptoPublicKey()
+			if rsaKey, ok := cryptoKey.(*rsa.PublicKey); ok {
+				if size := rsaKey.N.BitLen(); size < 2048 {
+					providerLog(logger.LevelError, "rsa key with size %d not accepted, minimum 2048", size)
+					return util.NewI18nError(
+						util.NewValidationError(fmt.Sprintf("invalid size %d for rsa key at position %d, minimum 2048",
+							size, idx)),
+						util.I18nErrorKeySizeInvalid,
+					)
+				}
+			}
+		}
+
+		validatedKeys = append(validatedKeys, key)
 	}
 	user.PublicKeys = util.RemoveDuplicates(validatedKeys, false)
 	return nil
@@ -2814,10 +2900,16 @@ func validateFiltersPatternExtensions(baseFilters *sdk.BaseUserFilters) error {
 	for _, f := range baseFilters.FilePatterns {
 		cleanedPath := filepath.ToSlash(path.Clean(f.Path))
 		if !path.IsAbs(cleanedPath) {
-			return util.NewValidationError(fmt.Sprintf("invalid path %q for file patterns filter", f.Path))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("invalid path %q for file patterns filter", f.Path)),
+				util.I18nErrorFilePatternPathInvalid,
+			)
 		}
 		if util.Contains(filteredPaths, cleanedPath) {
-			return util.NewValidationError(fmt.Sprintf("duplicate file patterns filter for path %q", f.Path))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("duplicate file patterns filter for path %q", f.Path)),
+				util.I18nErrorFilePatternDuplicated,
+			)
 		}
 		if len(f.AllowedPatterns) == 0 && len(f.DeniedPatterns) == 0 {
 			return util.NewValidationError(fmt.Sprintf("empty file patterns filter for path %q", f.Path))
@@ -2831,14 +2923,20 @@ func validateFiltersPatternExtensions(baseFilters *sdk.BaseUserFilters) error {
 		for _, pattern := range f.AllowedPatterns {
 			_, err := path.Match(pattern, "abc")
 			if err != nil {
-				return util.NewValidationError(fmt.Sprintf("invalid file pattern filter %q", pattern))
+				return util.NewI18nError(
+					util.NewValidationError(fmt.Sprintf("invalid file pattern filter %q", pattern)),
+					util.I18nErrorFilePatternInvalid,
+				)
 			}
 			allowed = append(allowed, strings.ToLower(pattern))
 		}
 		for _, pattern := range f.DeniedPatterns {
 			_, err := path.Match(pattern, "abc")
 			if err != nil {
-				return util.NewValidationError(fmt.Sprintf("invalid file pattern filter %q", pattern))
+				return util.NewI18nError(
+					util.NewValidationError(fmt.Sprintf("invalid file pattern filter %q", pattern)),
+					util.I18nErrorFilePatternInvalid,
+				)
 			}
 			denied = append(denied, strings.ToLower(pattern))
 		}
@@ -2939,13 +3037,50 @@ func validateFilterProtocols(filters *sdk.BaseUserFilters) error {
 	return nil
 }
 
+func validateTLSCerts(certs []string) ([]string, error) {
+	var validateCerts []string
+	for idx, cert := range certs {
+		if cert == "" {
+			continue
+		}
+		derBlock, _ := pem.Decode([]byte(cert))
+		if derBlock == nil {
+			return nil, util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("invalid TLS certificate %d", idx)),
+				util.I18nErrorInvalidTLSCert,
+			)
+		}
+		crt, err := x509.ParseCertificate(derBlock.Bytes)
+		if err != nil {
+			return nil, util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("error parsing TLS certificate %d", idx)),
+				util.I18nErrorInvalidTLSCert,
+			)
+		}
+		if crt.PublicKeyAlgorithm == x509.RSA {
+			if rsaCert, ok := crt.PublicKey.(*rsa.PublicKey); ok {
+				if size := rsaCert.N.BitLen(); size < 2048 {
+					providerLog(logger.LevelError, "rsa cert with size %d not accepted, minimum 2048", size)
+					return nil, util.NewI18nError(
+						util.NewValidationError(fmt.Sprintf("invalid size %d for rsa cert at position %d, minimum 2048",
+							size, idx)),
+						util.I18nErrorKeySizeInvalid,
+					)
+				}
+			}
+		}
+		validateCerts = append(validateCerts, cert)
+	}
+	return validateCerts, nil
+}
+
 func validateBaseFilters(filters *sdk.BaseUserFilters) error {
 	checkEmptyFiltersStruct(filters)
 	if err := validateIPFilters(filters); err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nErrorIPFiltersInvalid)
 	}
 	if err := validateBandwidthLimitsFilter(filters); err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nErrorSourceBWLimitInvalid)
 	}
 	if len(filters.DeniedLoginMethods) >= len(ValidLoginMethods) {
 		return util.NewValidationError("invalid denied_login_methods")
@@ -2963,56 +3098,135 @@ func validateBaseFilters(filters *sdk.BaseUserFilters) error {
 			return util.NewValidationError(fmt.Sprintf("invalid TLS username: %q", filters.TLSUsername))
 		}
 	}
+	certs, err := validateTLSCerts(filters.TLSCerts)
+	if err != nil {
+		return err
+	}
+	filters.TLSCerts = certs
 	for _, opts := range filters.WebClient {
 		if !util.Contains(sdk.WebClientOptions, opts) {
 			return util.NewValidationError(fmt.Sprintf("invalid web client options %q", opts))
 		}
 	}
 	if filters.MaxSharesExpiration > 0 && filters.MaxSharesExpiration < filters.DefaultSharesExpiration {
-		return util.NewValidationError(fmt.Sprintf("default shares expiration: %d must be less than or equal to max shares expiration: %d",
-			filters.DefaultSharesExpiration, filters.MaxSharesExpiration))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("default shares expiration: %d must be less than or equal to max shares expiration: %d",
+				filters.DefaultSharesExpiration, filters.MaxSharesExpiration)),
+			util.I18nErrorShareExpirationInvalid,
+		)
 	}
 	updateFiltersValues(filters)
+
+	if err := validateAccessTimeFilters(filters); err != nil {
+		return err
+	}
 
 	return validateFiltersPatternExtensions(filters)
 }
 
+func isTimeOfDayValid(value string) bool {
+	if len(value) != 5 {
+		return false
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 {
+		return false
+	}
+	hour, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	if hour < 0 || hour > 23 {
+		return false
+	}
+	minute, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	if minute < 0 || minute > 59 {
+		return false
+	}
+	return true
+}
+
+func validateAccessTimeFilters(filters *sdk.BaseUserFilters) error {
+	for _, period := range filters.AccessTime {
+		if period.DayOfWeek < int(time.Sunday) || period.DayOfWeek > int(time.Saturday) {
+			return util.NewValidationError(fmt.Sprintf("invalid day of week: %d", period.DayOfWeek))
+		}
+		if !isTimeOfDayValid(period.From) || !isTimeOfDayValid(period.To) {
+			return util.NewI18nError(
+				util.NewValidationError("invalid time of day. Supported format: HH:MM"),
+				util.I18nErrorTimeOfDayInvalid,
+			)
+		}
+		if period.To <= period.From {
+			return util.NewI18nError(
+				util.NewValidationError("invalid time of day. The end time cannot be earlier than the start time"),
+				util.I18nErrorTimeOfDayConflict,
+			)
+		}
+	}
+
+	return nil
+}
+
 func validateCombinedUserFilters(user *User) error {
 	if user.Filters.TOTPConfig.Enabled && util.Contains(user.Filters.WebClient, sdk.WebClientMFADisabled) {
-		return util.NewValidationError("two-factor authentication cannot be disabled for a user with an active configuration")
+		return util.NewI18nError(
+			util.NewValidationError("two-factor authentication cannot be disabled for a user with an active configuration"),
+			util.I18nErrorDisableActive2FA,
+		)
 	}
 	if user.Filters.RequirePasswordChange && util.Contains(user.Filters.WebClient, sdk.WebClientPasswordChangeDisabled) {
-		return util.NewValidationError("you cannot require password change and at the same time disallow it")
+		return util.NewI18nError(
+			util.NewValidationError("you cannot require password change and at the same time disallow it"),
+			util.I18nErrorPwdChangeConflict,
+		)
+	}
+	if len(user.Filters.TwoFactorAuthProtocols) > 0 && util.Contains(user.Filters.WebClient, sdk.WebClientMFADisabled) {
+		return util.NewI18nError(
+			util.NewValidationError("you cannot require two-factor authentication and at the same time disallow it"),
+			util.I18nError2FAConflict,
+		)
 	}
 	return nil
 }
 
 func validateBaseParams(user *User) error {
 	if user.Username == "" {
-		return util.NewValidationError("username is mandatory")
+		return util.NewI18nError(util.NewValidationError("username is mandatory"), util.I18nErrorUsernameRequired)
 	}
 	if err := checkReservedUsernames(user.Username); err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nErrorReservedUsername)
 	}
 	if user.Email != "" && !util.IsEmailValid(user.Email) {
-		return util.NewValidationError(fmt.Sprintf("email %q is not valid", user.Email))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("email %q is not valid", user.Email)),
+			util.I18nErrorInvalidEmail,
+		)
 	}
 	if config.NamingRules&1 == 0 && !usernameRegex.MatchString(user.Username) {
-		return util.NewValidationError(fmt.Sprintf("username %q is not valid, the following characters are allowed: a-zA-Z0-9-_.~",
-			user.Username))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("username %q is not valid, the following characters are allowed: a-zA-Z0-9-_.~", user.Username)),
+			util.I18nErrorInvalidUser,
+		)
 	}
 	if user.hasRedactedSecret() {
 		return util.NewValidationError("cannot save a user with a redacted secret")
 	}
 	if user.HomeDir == "" {
-		return util.NewValidationError("home_dir is mandatory")
+		return util.NewI18nError(util.NewValidationError("home_dir is mandatory"), util.I18nErrorHomeRequired)
 	}
 	// we can have users with no passwords and public keys, they can authenticate via SSH user certs or OIDC
 	/*if user.Password == "" && len(user.PublicKeys) == 0 {
 		return util.NewValidationError("please set a password or at least a public_key")
 	}*/
 	if !filepath.IsAbs(user.HomeDir) {
-		return util.NewValidationError(fmt.Sprintf("home_dir must be an absolute path, actual value: %v", user.HomeDir))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("home_dir must be an absolute path, actual value: %v", user.HomeDir)),
+			util.I18nErrorHomeInvalid,
+		)
 	}
 	if user.DownloadBandwidth < 0 {
 		user.DownloadBandwidth = 0
@@ -3028,7 +3242,11 @@ func validateBaseParams(user *User) error {
 	if user.Filters.IsAnonymous {
 		user.setAnonymousSettings()
 	}
-	return user.FsConfig.Validate(user.GetEncryptionAdditionalData())
+	err := user.FsConfig.Validate(user.GetEncryptionAdditionalData())
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func hashPlainPassword(plainPwd string) (string, error) {
@@ -3037,7 +3255,7 @@ func hashPlainPassword(plainPwd string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("bcrypt hashing error: %w", err)
 		}
-		return string(pwd), nil
+		return util.BytesToString(pwd), nil
 	}
 	pwd, err := argon2id.CreateHash(plainPwd, argon2Params)
 	if err != nil {
@@ -3050,7 +3268,7 @@ func createUserPasswordHash(user *User) error {
 	if user.Password != "" && !user.IsPasswordHashed() {
 		if minEntropy := user.getMinPasswordEntropy(); minEntropy > 0 {
 			if err := passwordvalidator.Validate(user.Password, minEntropy); err != nil {
-				return util.NewValidationError(err.Error())
+				return util.NewI18nError(util.NewValidationError(err.Error()), util.I18nErrorPasswordComplexity)
 			}
 		}
 		hashedPwd, err := hashPlainPassword(user.Password)
@@ -3068,17 +3286,22 @@ func createUserPasswordHash(user *User) error {
 func ValidateFolder(folder *vfs.BaseVirtualFolder) error {
 	folder.FsConfig.SetEmptySecretsIfNil()
 	if folder.Name == "" {
-		return util.NewValidationError("folder name is mandatory")
+		return util.NewI18nError(util.NewValidationError("folder name is mandatory"), util.I18nErrorNameRequired)
 	}
 	if config.NamingRules&1 == 0 && !usernameRegex.MatchString(folder.Name) {
-		return util.NewValidationError(fmt.Sprintf("folder name %q is not valid, the following characters are allowed: a-zA-Z0-9-_.~",
-			folder.Name))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("folder name %q is not valid, the following characters are allowed: a-zA-Z0-9-_.~", folder.Name)),
+			util.I18nErrorInvalidName,
+		)
 	}
 	if folder.FsConfig.Provider == sdk.LocalFilesystemProvider || folder.FsConfig.Provider == sdk.CryptedFilesystemProvider ||
 		folder.MappedPath != "" {
 		cleanedMPath := filepath.Clean(folder.MappedPath)
 		if !filepath.IsAbs(cleanedMPath) {
-			return util.NewValidationError(fmt.Sprintf("invalid folder mapped path %q", folder.MappedPath))
+			return util.NewI18nError(
+				util.NewValidationError(fmt.Sprintf("invalid folder mapped path %q", folder.MappedPath)),
+				util.I18nErrorInvalidHomeDir,
+			)
 		}
 		folder.MappedPath = cleanedMPath
 	}
@@ -3105,10 +3328,10 @@ func ValidateUser(user *User) error {
 		return err
 	}
 	if err := validateUserTOTPConfig(&user.Filters.TOTPConfig, user.Username); err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nError2FAInvalid)
 	}
 	if err := validateUserRecoveryCodes(user); err != nil {
-		return err
+		return util.NewI18nError(err, util.I18nErrorRecoveryCodesInvalid)
 	}
 	vfolders, err := validateAssociatedVirtualFolders(user.VirtualFolders)
 	if err != nil {
@@ -3144,32 +3367,35 @@ func isPasswordOK(user *User, password string) (bool, error) {
 	match := false
 	updatePwd := true
 	var err error
-	if strings.HasPrefix(user.Password, bcryptPwdPrefix) {
-		if err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
+
+	switch {
+	case strings.HasPrefix(user.Password, bcryptPwdPrefix):
+		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
 			return match, ErrInvalidCredentials
 		}
 		match = true
 		updatePwd = config.PasswordHashing.Algo != HashingAlgoBcrypt
-	} else if strings.HasPrefix(user.Password, argonPwdPrefix) {
+	case strings.HasPrefix(user.Password, argonPwdPrefix):
 		match, err = argon2id.ComparePasswordAndHash(password, user.Password)
 		if err != nil {
 			providerLog(logger.LevelError, "error comparing password with argon hash: %v", err)
 			return match, err
 		}
 		updatePwd = config.PasswordHashing.Algo != HashingAlgoArgon2ID
-	} else if util.IsStringPrefixInSlice(user.Password, unixPwdPrefixes) {
+	case util.IsStringPrefixInSlice(user.Password, unixPwdPrefixes):
 		match, err = compareUnixPasswordAndHash(user, password)
 		if err != nil {
 			return match, err
 		}
-	} else if util.IsStringPrefixInSlice(user.Password, pbkdfPwdPrefixes) {
+	case util.IsStringPrefixInSlice(user.Password, pbkdfPwdPrefixes):
 		match, err = comparePbkdf2PasswordAndHash(password, user.Password)
 		if err != nil {
 			return match, err
 		}
-	} else if util.IsStringPrefixInSlice(user.Password, digestPwdPrefixes) {
+	case util.IsStringPrefixInSlice(user.Password, digestPwdPrefixes):
 		match = compareDigestPasswordAndHash(user, password)
 	}
+
 	if err == nil && match {
 		cachedUserPasswords.Add(user.Username, password, user.Password)
 		if updatePwd {
@@ -3202,6 +3428,12 @@ func checkUserAndTLSCertificate(user *User, protocol string, tlsCert *x509.Certi
 	}
 	switch protocol {
 	case protocolFTP, protocolWebDAV:
+		for _, cert := range user.Filters.TLSCerts {
+			derBlock, _ := pem.Decode(util.StringToBytes(cert))
+			if derBlock != nil && bytes.Equal(derBlock.Bytes, tlsCert.Raw) {
+				return *user, nil
+			}
+		}
 		if user.Filters.TLSUsername == sdk.TLSUsernameCN {
 			if user.Username == tlsCert.Subject.CommonName {
 				return *user, nil
@@ -3318,14 +3550,14 @@ func checkUserAndPubKey(user *User, pubKey []byte, isSSHCert bool) (User, string
 	if len(user.PublicKeys) == 0 {
 		return *user, "", ErrInvalidCredentials
 	}
-	for i, k := range user.PublicKeys {
-		storedPubKey, comment, _, _, err := ssh.ParseAuthorizedKey([]byte(k))
+	for idx, key := range user.PublicKeys {
+		storedKey, comment, _, _, err := ssh.ParseAuthorizedKey(util.StringToBytes(key))
 		if err != nil {
-			providerLog(logger.LevelError, "error parsing stored public key %d for user %s: %v", i, user.Username, err)
+			providerLog(logger.LevelError, "error parsing stored public key %d for user %s: %v", idx, user.Username, err)
 			return *user, "", err
 		}
-		if bytes.Equal(storedPubKey.Marshal(), pubKey) {
-			return *user, fmt.Sprintf("%s:%s", ssh.FingerprintSHA256(storedPubKey), comment), nil
+		if bytes.Equal(storedKey.Marshal(), pubKey) {
+			return *user, fmt.Sprintf("%s:%s", ssh.FingerprintSHA256(storedKey), comment), nil
 		}
 	}
 	return *user, "", ErrInvalidCredentials
@@ -3473,21 +3705,25 @@ func sendKeyboardAuthHTTPReq(url string, request *plugin.KeyboardAuthRequest) (*
 	return &response, err
 }
 
-func doBuiltinKeyboardInteractiveAuth(user *User, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (int, error) {
-	answers, err := client("", "", []string{"Password: "}, []bool{false})
-	if err != nil {
+func doBuiltinKeyboardInteractiveAuth(user *User, client ssh.KeyboardInteractiveChallenge,
+	ip, protocol string, isPartialAuth bool,
+) (int, error) {
+	if err := user.LoadAndApplyGroupSettings(); err != nil {
 		return 0, err
 	}
-	if len(answers) != 1 {
-		return 0, fmt.Errorf("unexpected number of answers: %d", len(answers))
-	}
-	err = user.LoadAndApplyGroupSettings()
-	if err != nil {
-		return 0, err
-	}
-	_, err = checkUserAndPass(user, answers[0], ip, protocol)
-	if err != nil {
-		return 0, err
+	hasSecondFactor := user.Filters.TOTPConfig.Enabled && util.Contains(user.Filters.TOTPConfig.Protocols, protocolSSH)
+	if !isPartialAuth || !hasSecondFactor {
+		answers, err := client("", "", []string{"Password: "}, []bool{false})
+		if err != nil {
+			return 0, err
+		}
+		if len(answers) != 1 {
+			return 0, fmt.Errorf("unexpected number of answers: %d", len(answers))
+		}
+		_, err = checkUserAndPass(user, answers[0], ip, protocol)
+		if err != nil {
+			return 0, err
+		}
 	}
 	return checkKeyboardInteractiveSecondFactor(user, client, protocol)
 }
@@ -3730,32 +3966,37 @@ func executeKeyboardInteractiveProgram(user *User, authHook string, client ssh.K
 	return authResult, err
 }
 
-func doKeyboardInteractiveAuth(user *User, authHook string, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (User, error) {
+func doKeyboardInteractiveAuth(user *User, authHook string, client ssh.KeyboardInteractiveChallenge,
+	ip, protocol string, isPartialAuth bool,
+) (User, error) {
+	if err := user.LoadAndApplyGroupSettings(); err != nil {
+		return *user, err
+	}
 	var authResult int
 	var err error
-	if plugin.Handler.HasAuthScope(plugin.AuthScopeKeyboardInteractive) {
-		authResult, err = executeKeyboardInteractivePlugin(user, client, ip, protocol)
-		if authResult == 1 && err == nil {
-			authResult, err = checkKeyboardInteractiveSecondFactor(user, client, protocol)
-		}
-	} else if authHook != "" {
-		if strings.HasPrefix(authHook, "http") {
-			authResult, err = executeKeyboardInteractiveHTTPHook(user, authHook, client, ip, protocol)
+	if !user.Filters.Hooks.ExternalAuthDisabled {
+		if plugin.Handler.HasAuthScope(plugin.AuthScopeKeyboardInteractive) {
+			authResult, err = executeKeyboardInteractivePlugin(user, client, ip, protocol)
+			if authResult == 1 && err == nil {
+				authResult, err = checkKeyboardInteractiveSecondFactor(user, client, protocol)
+			}
+		} else if authHook != "" {
+			if strings.HasPrefix(authHook, "http") {
+				authResult, err = executeKeyboardInteractiveHTTPHook(user, authHook, client, ip, protocol)
+			} else {
+				authResult, err = executeKeyboardInteractiveProgram(user, authHook, client, ip, protocol)
+			}
 		} else {
-			authResult, err = executeKeyboardInteractiveProgram(user, authHook, client, ip, protocol)
+			authResult, err = doBuiltinKeyboardInteractiveAuth(user, client, ip, protocol, isPartialAuth)
 		}
 	} else {
-		authResult, err = doBuiltinKeyboardInteractiveAuth(user, client, ip, protocol)
+		authResult, err = doBuiltinKeyboardInteractiveAuth(user, client, ip, protocol, isPartialAuth)
 	}
 	if err != nil {
 		return *user, err
 	}
 	if authResult != 1 {
 		return *user, fmt.Errorf("keyboard interactive auth failed, result: %v", authResult)
-	}
-	err = user.LoadAndApplyGroupSettings()
-	if err != nil {
-		return *user, err
 	}
 	err = user.CheckLoginConditions()
 	if err != nil {
@@ -3818,7 +4059,7 @@ func getPasswordHookResponse(username, password, ip, protocol string) ([]byte, e
 		fmt.Sprintf("SFTPGO_AUTHD_IP=%s", ip),
 		fmt.Sprintf("SFTPGO_AUTHD_PROTOCOL=%s", protocol),
 	)
-	return getCmdOutput(cmd, "check_password_hook")
+	return cmd.Output()
 }
 
 func executeCheckPasswordHook(username, password, ip, protocol string) (checkPasswordResponse, error) {
@@ -3874,12 +4115,12 @@ func getPreLoginHookResponse(loginMethod, ip, protocol string, userAsJSON []byte
 
 	cmd := exec.CommandContext(ctx, config.PreLoginHook, args...)
 	cmd.Env = append(env,
-		fmt.Sprintf("SFTPGO_LOGIND_USER=%s", string(userAsJSON)),
+		fmt.Sprintf("SFTPGO_LOGIND_USER=%s", util.BytesToString(userAsJSON)),
 		fmt.Sprintf("SFTPGO_LOGIND_METHOD=%s", loginMethod),
 		fmt.Sprintf("SFTPGO_LOGIND_IP=%s", ip),
 		fmt.Sprintf("SFTPGO_LOGIND_PROTOCOL=%s", protocol),
 	)
-	return getCmdOutput(cmd, "pre_login_hook")
+	return cmd.Output()
 }
 
 func executePreLoginHook(username, loginMethod, ip, protocol string, oidcTokenFields *map[string]any) (User, error) {
@@ -3921,7 +4162,7 @@ func executePreLoginHook(username, loginMethod, ip, protocol string, oidcTokenFi
 	recoveryCodes := u.Filters.RecoveryCodes
 	err = json.Unmarshal(out, &u)
 	if err != nil {
-		return u, fmt.Errorf("invalid pre-login hook response %q, error: %v", string(out), err)
+		return u, fmt.Errorf("invalid pre-login hook response %q, error: %v", util.BytesToString(out), err)
 	}
 	u.ID = userID
 	u.UsedQuotaSize = userUsedQuotaSize
@@ -4016,7 +4257,7 @@ func ExecutePostLoginHook(user *User, loginMethod, ip, protocol string, err erro
 
 		cmd := exec.CommandContext(ctx, config.PostLoginHook, args...)
 		cmd.Env = append(env,
-			fmt.Sprintf("SFTPGO_LOGIND_USER=%s", string(userAsJSON)),
+			fmt.Sprintf("SFTPGO_LOGIND_USER=%s", util.BytesToString(userAsJSON)),
 			fmt.Sprintf("SFTPGO_LOGIND_IP=%s", ip),
 			fmt.Sprintf("SFTPGO_LOGIND_METHOD=%s", loginMethod),
 			fmt.Sprintf("SFTPGO_LOGIND_STATUS=%s", status),
@@ -4085,7 +4326,7 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, 
 	cmd := exec.CommandContext(ctx, config.ExternalAuthHook, args...)
 	cmd.Env = append(env,
 		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%s", username),
-		fmt.Sprintf("SFTPGO_AUTHD_USER=%s", string(userAsJSON)),
+		fmt.Sprintf("SFTPGO_AUTHD_USER=%s", util.BytesToString(userAsJSON)),
 		fmt.Sprintf("SFTPGO_AUTHD_IP=%s", ip),
 		fmt.Sprintf("SFTPGO_AUTHD_PASSWORD=%s", password),
 		fmt.Sprintf("SFTPGO_AUTHD_PUBLIC_KEY=%s", pkey),
@@ -4093,7 +4334,7 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, 
 		fmt.Sprintf("SFTPGO_AUTHD_TLS_CERT=%s", strings.ReplaceAll(tlsCert, "\n", "\\n")),
 		fmt.Sprintf("SFTPGO_AUTHD_KEYBOARD_INTERACTIVE=%v", keyboardInteractive))
 
-	return getCmdOutput(cmd, "external_auth_hook")
+	return cmd.Output()
 }
 
 func updateUserFromExtAuthResponse(user *User, password, pkey string) {
@@ -4201,7 +4442,7 @@ func doExternalAuth(username, password string, pubKey []byte, keyboardInteractiv
 		// preserve TOTP config and recovery codes
 		user.Filters.TOTPConfig = u.Filters.TOTPConfig
 		user.Filters.RecoveryCodes = u.Filters.RecoveryCodes
-		err = provider.updateUser(&user)
+		user, err = updateUserAfterExternalAuth(&user)
 		if err == nil {
 			if protocol != protocolWebDAV {
 				webDAVUsersCache.swap(&user, password)
@@ -4273,7 +4514,7 @@ func doPluginAuth(username, password string, pubKey []byte, ip, protocol string,
 		// preserve TOTP config and recovery codes
 		user.Filters.TOTPConfig = u.Filters.TOTPConfig
 		user.Filters.RecoveryCodes = u.Filters.RecoveryCodes
-		err = provider.updateUser(&user)
+		user, err = updateUserAfterExternalAuth(&user)
 		if err == nil {
 			if protocol != protocolWebDAV {
 				webDAVUsersCache.swap(&user, password)
@@ -4285,6 +4526,13 @@ func doPluginAuth(username, password string, pubKey []byte, ip, protocol string,
 	err = provider.addUser(&user)
 	if err != nil {
 		return user, err
+	}
+	return provider.userExists(user.Username, "")
+}
+
+func updateUserAfterExternalAuth(user *User) (User, error) {
+	if err := provider.updateUser(user); err != nil {
+		return *user, err
 	}
 	return provider.userExists(user.Username, "")
 }
@@ -4375,30 +4623,6 @@ func checkReservedUsernames(username string) error {
 		return util.NewValidationError("this username is reserved")
 	}
 	return nil
-}
-
-func getCmdOutput(cmd *exec.Cmd, sender string) ([]byte, error) {
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	err = cmd.Start()
-	if err != nil {
-		return nil, err
-	}
-
-	scanner := bufio.NewScanner(stderr)
-	for scanner.Scan() {
-		if out := scanner.Text(); out != "" {
-			logger.Log(logger.LevelWarn, sender, "", out)
-		}
-	}
-	err = cmd.Wait()
-	return stdout.Bytes(), err
 }
 
 func providerLog(level logger.LogLevel, format string, v ...any) {

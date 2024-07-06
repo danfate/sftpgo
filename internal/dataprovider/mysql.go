@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -32,6 +32,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
+	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
@@ -115,7 +116,7 @@ const (
 		"ALTER TABLE `{{users_groups_mapping}}` ADD CONSTRAINT `{{prefix}}users_groups_mapping_group_id_fk_groups_id` " +
 		"FOREIGN KEY (`group_id`) REFERENCES `{{groups}}` (`id`) ON DELETE NO ACTION;" +
 		"ALTER TABLE `{{users_groups_mapping}}` ADD CONSTRAINT `{{prefix}}users_groups_mapping_user_id_fk_users_id` " +
-		"FOREIGN KEY (`user_id`) REFERENCES `{{users}}` (`id`) ON DELETE CASCADE;" +
+		"FOREIGN KEY (`user_id`) REFERENCES `{{users}}` (`id`) ON DELETE CASCADE; " +
 		"ALTER TABLE `{{groups_folders_mapping}}` ADD CONSTRAINT `{{prefix}}groups_folders_mapping_folder_id_fk_folders_id` " +
 		"FOREIGN KEY (`folder_id`) REFERENCES `{{folders}}` (`id`) ON DELETE CASCADE;" +
 		"ALTER TABLE `{{groups_folders_mapping}}` ADD CONSTRAINT `{{prefix}}groups_folders_mapping_group_id_fk_groups_id` " +
@@ -193,6 +194,10 @@ const (
 		"CREATE INDEX `{{prefix}}ip_lists_deleted_at_idx` ON `{{ip_lists}}` (`deleted_at`);" +
 		"CREATE INDEX `{{prefix}}ip_lists_first_last_idx` ON `{{ip_lists}}` (`first`, `last`);" +
 		"INSERT INTO {{schema_version}} (version) VALUES (28);"
+	mysqlV29SQL = "ALTER TABLE `{{users}}` MODIFY `used_download_data_transfer` bigint NOT NULL;" +
+		"ALTER TABLE `{{users}}` MODIFY `used_upload_data_transfer` bigint NOT NULL;"
+	mysqlV29DownSQL = "ALTER TABLE `{{users}}` MODIFY `used_upload_data_transfer` integer NOT NULL;" +
+		"ALTER TABLE `{{users}}` MODIFY `used_download_data_transfer` integer NOT NULL;"
 )
 
 // MySQLProvider defines the auth provider for MySQL/MariaDB database
@@ -341,11 +346,11 @@ func (p *MySQLProvider) userExists(username, role string) (User, error) {
 }
 
 func (p *MySQLProvider) addUser(user *User) error {
-	return sqlCommonAddUser(user, p.dbHandle)
+	return p.normalizeError(sqlCommonAddUser(user, p.dbHandle), fieldUsername)
 }
 
 func (p *MySQLProvider) updateUser(user *User) error {
-	return sqlCommonUpdateUser(user, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateUser(user, p.dbHandle), -1)
 }
 
 func (p *MySQLProvider) deleteUser(user User, softDelete bool) error {
@@ -387,7 +392,7 @@ func (p *MySQLProvider) getFolderByName(name string) (vfs.BaseVirtualFolder, err
 }
 
 func (p *MySQLProvider) addFolder(folder *vfs.BaseVirtualFolder) error {
-	return sqlCommonAddFolder(folder, p.dbHandle)
+	return p.normalizeError(sqlCommonAddFolder(folder, p.dbHandle), fieldName)
 }
 
 func (p *MySQLProvider) updateFolder(folder *vfs.BaseVirtualFolder) error {
@@ -423,7 +428,7 @@ func (p *MySQLProvider) groupExists(name string) (Group, error) {
 }
 
 func (p *MySQLProvider) addGroup(group *Group) error {
-	return sqlCommonAddGroup(group, p.dbHandle)
+	return p.normalizeError(sqlCommonAddGroup(group, p.dbHandle), fieldName)
 }
 
 func (p *MySQLProvider) updateGroup(group *Group) error {
@@ -443,11 +448,11 @@ func (p *MySQLProvider) adminExists(username string) (Admin, error) {
 }
 
 func (p *MySQLProvider) addAdmin(admin *Admin) error {
-	return sqlCommonAddAdmin(admin, p.dbHandle)
+	return p.normalizeError(sqlCommonAddAdmin(admin, p.dbHandle), fieldUsername)
 }
 
 func (p *MySQLProvider) updateAdmin(admin *Admin) error {
-	return sqlCommonUpdateAdmin(admin, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateAdmin(admin, p.dbHandle), -1)
 }
 
 func (p *MySQLProvider) deleteAdmin(admin Admin) error {
@@ -471,11 +476,11 @@ func (p *MySQLProvider) apiKeyExists(keyID string) (APIKey, error) {
 }
 
 func (p *MySQLProvider) addAPIKey(apiKey *APIKey) error {
-	return sqlCommonAddAPIKey(apiKey, p.dbHandle)
+	return p.normalizeError(sqlCommonAddAPIKey(apiKey, p.dbHandle), -1)
 }
 
 func (p *MySQLProvider) updateAPIKey(apiKey *APIKey) error {
-	return sqlCommonUpdateAPIKey(apiKey, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateAPIKey(apiKey, p.dbHandle), -1)
 }
 
 func (p *MySQLProvider) deleteAPIKey(apiKey APIKey) error {
@@ -499,11 +504,11 @@ func (p *MySQLProvider) shareExists(shareID, username string) (Share, error) {
 }
 
 func (p *MySQLProvider) addShare(share *Share) error {
-	return sqlCommonAddShare(share, p.dbHandle)
+	return p.normalizeError(sqlCommonAddShare(share, p.dbHandle), fieldName)
 }
 
 func (p *MySQLProvider) updateShare(share *Share) error {
-	return sqlCommonUpdateShare(share, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateShare(share, p.dbHandle), -1)
 }
 
 func (p *MySQLProvider) deleteShare(share Share) error {
@@ -603,7 +608,7 @@ func (p *MySQLProvider) eventActionExists(name string) (BaseEventAction, error) 
 }
 
 func (p *MySQLProvider) addEventAction(action *BaseEventAction) error {
-	return sqlCommonAddEventAction(action, p.dbHandle)
+	return p.normalizeError(sqlCommonAddEventAction(action, p.dbHandle), fieldName)
 }
 
 func (p *MySQLProvider) updateEventAction(action *BaseEventAction) error {
@@ -631,7 +636,7 @@ func (p *MySQLProvider) eventRuleExists(name string) (EventRule, error) {
 }
 
 func (p *MySQLProvider) addEventRule(rule *EventRule) error {
-	return sqlCommonAddEventRule(rule, p.dbHandle)
+	return p.normalizeError(sqlCommonAddEventRule(rule, p.dbHandle), fieldName)
 }
 
 func (p *MySQLProvider) updateEventRule(rule *EventRule) error {
@@ -683,7 +688,7 @@ func (p *MySQLProvider) roleExists(name string) (Role, error) {
 }
 
 func (p *MySQLProvider) addRole(role *Role) error {
-	return sqlCommonAddRole(role, p.dbHandle)
+	return p.normalizeError(sqlCommonAddRole(role, p.dbHandle), fieldName)
 }
 
 func (p *MySQLProvider) updateRole(role *Role) error {
@@ -707,7 +712,7 @@ func (p *MySQLProvider) ipListEntryExists(ipOrNet string, listType IPListType) (
 }
 
 func (p *MySQLProvider) addIPListEntry(entry *IPListEntry) error {
-	return sqlCommonAddIPListEntry(entry, p.dbHandle)
+	return p.normalizeError(sqlCommonAddIPListEntry(entry, p.dbHandle), fieldIPNet)
 }
 
 func (p *MySQLProvider) updateIPListEntry(entry *IPListEntry) error {
@@ -793,6 +798,8 @@ func (p *MySQLProvider) migrateDatabase() error {
 		providerLog(logger.LevelError, "%v", err)
 		logger.ErrorToConsole("%v", err)
 		return err
+	case version == 28:
+		return updateMySQLDatabaseFrom28To29(p.dbHandle)
 	default:
 		if version > sqlDatabaseVersion {
 			providerLog(logger.LevelError, "database schema version %d is newer than the supported one: %d", version,
@@ -815,6 +822,8 @@ func (p *MySQLProvider) revertDatabase(targetVersion int) error {
 	}
 
 	switch dbVersion.Version {
+	case 29:
+		return downgradeMySQLDatabaseFrom29To28(p.dbHandle)
 	default:
 		return fmt.Errorf("database schema version not handled: %d", dbVersion.Version)
 	}
@@ -823,4 +832,48 @@ func (p *MySQLProvider) revertDatabase(targetVersion int) error {
 func (p *MySQLProvider) resetDatabase() error {
 	sql := sqlReplaceAll(mysqlResetSQL)
 	return sqlCommonExecSQLAndUpdateDBVersion(p.dbHandle, strings.Split(sql, ";"), 0, false)
+}
+
+func (p *MySQLProvider) normalizeError(err error, fieldType int) error {
+	if err == nil {
+		return nil
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1062:
+			var message string
+			switch fieldType {
+			case fieldUsername:
+				message = util.I18nErrorDuplicatedUsername
+			case fieldIPNet:
+				message = util.I18nErrorDuplicatedIPNet
+			default:
+				message = util.I18nErrorDuplicatedName
+			}
+			return util.NewI18nError(
+				fmt.Errorf("%w: %s", ErrDuplicatedKey, err.Error()),
+				message,
+			)
+		case 1452:
+			return fmt.Errorf("%w: %s", ErrForeignKeyViolated, err.Error())
+		}
+	}
+	return err
+}
+
+func updateMySQLDatabaseFrom28To29(dbHandle *sql.DB) error {
+	logger.InfoToConsole("updating database schema version: 28 -> 29")
+	providerLog(logger.LevelInfo, "updating database schema version: 28 -> 29")
+
+	sql := strings.ReplaceAll(mysqlV29SQL, "{{users}}", sqlTableUsers)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, strings.Split(sql, ";"), 29, true)
+}
+
+func downgradeMySQLDatabaseFrom29To28(dbHandle *sql.DB) error {
+	logger.InfoToConsole("downgrading database schema version: 29 -> 28")
+	providerLog(logger.LevelInfo, "downgrading database schema version: 29 -> 28")
+
+	sql := strings.ReplaceAll(mysqlV29DownSQL, "{{users}}", sqlTableUsers)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, strings.Split(sql, ";"), 28, false)
 }

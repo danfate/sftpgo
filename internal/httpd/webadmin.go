@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -16,6 +16,7 @@ package httpd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -42,7 +43,6 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/smtp"
 	"github.com/drakkan/sftpgo/v2/internal/util"
-	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
 
@@ -72,7 +72,6 @@ const (
 const (
 	templateAdminDir         = "webadmin"
 	templateBase             = "base.html"
-	templateBaseLogin        = "baselogin.html"
 	templateFsConfig         = "fsconfig.html"
 	templateSharedComponents = "sharedcomponents.html"
 	templateUsers            = "users.html"
@@ -91,37 +90,15 @@ const (
 	templateRoles            = "roles.html"
 	templateRole             = "role.html"
 	templateEvents           = "events.html"
-	templateMessage          = "message.html"
 	templateStatus           = "status.html"
-	templateLogin            = "login.html"
 	templateDefender         = "defender.html"
 	templateIPLists          = "iplists.html"
 	templateIPList           = "iplist.html"
 	templateConfigs          = "configs.html"
 	templateProfile          = "profile.html"
-	templateChangePwd        = "changepassword.html"
 	templateMaintenance      = "maintenance.html"
 	templateMFA              = "mfa.html"
 	templateSetup            = "adminsetup.html"
-	pageUsersTitle           = "Users"
-	pageAdminsTitle          = "Admins"
-	pageConnectionsTitle     = "Connections"
-	pageStatusTitle          = "Status"
-	pageFoldersTitle         = "Folders"
-	pageGroupsTitle          = "Groups"
-	pageEventRulesTitle      = "Event rules"
-	pageEventActionsTitle    = "Event actions"
-	pageRolesTitle           = "Roles"
-	pageProfileTitle         = "My profile"
-	pageChangePwdTitle       = "Change password"
-	pageMaintenanceTitle     = "Maintenance"
-	pageDefenderTitle        = "Auto Blocklist"
-	pageIPListsTitle         = "IP Lists"
-	pageEventsTitle          = "Logs"
-	pageConfigsTitle         = "Configurations"
-	pageForgotPwdTitle       = "SFTPGo Admin - Forgot password"
-	pageResetPwdTitle        = "SFTPGo Admin - Reset password"
-	pageSetupTitle           = "Create first admin user"
 	defaultQueryLimit        = 1000
 	inversePatternType       = "inverse"
 )
@@ -131,6 +108,7 @@ var (
 )
 
 type basePage struct {
+	commonBasePage
 	Title               string
 	CurrentURL          string
 	UsersURL            string
@@ -151,6 +129,7 @@ type basePage struct {
 	EventsURL           string
 	ConfigsURL          string
 	LogoutURL           string
+	LoginURL            string
 	ProfileURL          string
 	ChangePwdURL        string
 	MFAURL              string
@@ -163,22 +142,6 @@ type basePage struct {
 	FolderQuotaScanURL  string
 	StatusURL           string
 	MaintenanceURL      string
-	StaticURL           string
-	UsersTitle          string
-	AdminsTitle         string
-	ConnectionsTitle    string
-	FoldersTitle        string
-	GroupsTitle         string
-	EventRulesTitle     string
-	EventActionsTitle   string
-	RolesTitle          string
-	StatusTitle         string
-	MaintenanceTitle    string
-	DefenderTitle       string
-	IPListsTitle        string
-	EventsTitle         string
-	ConfigsTitle        string
-	Version             string
 	CSRFToken           string
 	IsEventManagerPage  bool
 	IsIPManagerPage     bool
@@ -186,48 +149,8 @@ type basePage struct {
 	HasDefender         bool
 	HasSearcher         bool
 	HasExternalLogin    bool
-	LoggedAdmin         *dataprovider.Admin
+	LoggedUser          *dataprovider.Admin
 	Branding            UIBranding
-}
-
-type usersPage struct {
-	basePage
-	Users []dataprovider.User
-}
-
-type adminsPage struct {
-	basePage
-	Admins []dataprovider.Admin
-}
-
-type foldersPage struct {
-	basePage
-	Folders []vfs.BaseVirtualFolder
-}
-
-type groupsPage struct {
-	basePage
-	Groups []dataprovider.Group
-}
-
-type rolesPage struct {
-	basePage
-	Roles []dataprovider.Role
-}
-
-type eventRulesPage struct {
-	basePage
-	Rules []dataprovider.EventRule
-}
-
-type eventActionsPage struct {
-	basePage
-	Actions []dataprovider.BaseEventAction
-}
-
-type connectionsPage struct {
-	basePage
-	Connections []common.ConnectionStatus
 }
 
 type statusPage struct {
@@ -248,7 +171,7 @@ type userPage struct {
 	basePage
 	User               *dataprovider.User
 	RootPerms          []string
-	Error              string
+	Error              *util.I18nError
 	ValidPerms         []string
 	ValidLoginMethods  []string
 	ValidProtocols     []string
@@ -268,13 +191,13 @@ type adminPage struct {
 	Admin  *dataprovider.Admin
 	Groups []dataprovider.Group
 	Roles  []dataprovider.Role
-	Error  string
+	Error  *util.I18nError
 	IsAdd  bool
 }
 
 type profilePage struct {
 	basePage
-	Error           string
+	Error           *util.I18nError
 	AllowAPIKeyAuth bool
 	Email           string
 	Description     string
@@ -282,24 +205,25 @@ type profilePage struct {
 
 type changePasswordPage struct {
 	basePage
-	Error string
+	Error *util.I18nError
 }
 
 type mfaPage struct {
 	basePage
-	TOTPConfigs     []string
-	TOTPConfig      dataprovider.AdminTOTPConfig
-	GenerateTOTPURL string
-	ValidateTOTPURL string
-	SaveTOTPURL     string
-	RecCodesURL     string
+	TOTPConfigs      []string
+	TOTPConfig       dataprovider.AdminTOTPConfig
+	GenerateTOTPURL  string
+	ValidateTOTPURL  string
+	SaveTOTPURL      string
+	RecCodesURL      string
+	RequireTwoFactor bool
 }
 
 type maintenancePage struct {
 	basePage
 	BackupPath  string
 	RestorePath string
-	Error       string
+	Error       *util.I18nError
 }
 
 type defenderHostsPage struct {
@@ -318,23 +242,27 @@ type ipListsPage struct {
 type ipListPage struct {
 	basePage
 	Entry *dataprovider.IPListEntry
-	Error string
+	Error *util.I18nError
 	Mode  genericPageMode
 }
 
 type setupPage struct {
-	basePage
+	commonBasePage
+	CurrentURL           string
+	Error                *util.I18nError
+	CSRFToken            string
 	Username             string
 	HasInstallationCode  bool
 	InstallationCodeHint string
 	HideSupportLink      bool
-	Error                string
+	Title                string
+	Branding             UIBranding
 }
 
 type folderPage struct {
 	basePage
 	Folder    vfs.BaseVirtualFolder
-	Error     string
+	Error     *util.I18nError
 	Mode      folderPageMode
 	FsWrapper fsWrapper
 }
@@ -342,7 +270,7 @@ type folderPage struct {
 type groupPage struct {
 	basePage
 	Group              *dataprovider.Group
-	Error              string
+	Error              *util.I18nError
 	Mode               genericPageMode
 	ValidPerms         []string
 	ValidLoginMethods  []string
@@ -356,7 +284,7 @@ type groupPage struct {
 type rolePage struct {
 	basePage
 	Role  *dataprovider.Role
-	Error string
+	Error *util.I18nError
 	Mode  genericPageMode
 }
 
@@ -367,7 +295,7 @@ type eventActionPage struct {
 	FsActions      []dataprovider.EnumMapping
 	HTTPMethods    []string
 	RedactedSecret string
-	Error          string
+	Error          *util.I18nError
 	Mode           genericPageMode
 }
 
@@ -380,7 +308,7 @@ type eventRulePage struct {
 	Protocols       []string
 	ProviderEvents  []string
 	ProviderObjects []string
-	Error           string
+	Error           *util.I18nError
 	Mode            genericPageMode
 	IsShared        bool
 }
@@ -399,13 +327,14 @@ type configsPage struct {
 	RedactedSecret    string
 	OAuth2TokenURL    string
 	OAuth2RedirectURL string
-	Error             string
+	Error             *util.I18nError
 }
 
 type messagePage struct {
 	basePage
-	Error   string
+	Error   *util.I18nError
 	Success string
+	Text    string
 }
 
 type userTemplateFields struct {
@@ -416,176 +345,170 @@ type userTemplateFields struct {
 
 func loadAdminTemplates(templatesPath string) {
 	usersPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateUsers),
 	}
 	userPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
-		filepath.Join(templatesPath, templateAdminDir, templateSharedComponents),
 		filepath.Join(templatesPath, templateAdminDir, templateFsConfig),
 		filepath.Join(templatesPath, templateAdminDir, templateUser),
 	}
 	adminsPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateAdmins),
 	}
 	adminPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateAdmin),
 	}
 	profilePaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateProfile),
 	}
 	changePwdPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
-		filepath.Join(templatesPath, templateAdminDir, templateChangePwd),
+		filepath.Join(templatesPath, templateCommonDir, templateChangePwd),
 	}
 	connectionsPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateConnections),
 	}
 	messagePaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
-		filepath.Join(templatesPath, templateAdminDir, templateMessage),
+		filepath.Join(templatesPath, templateCommonDir, templateMessage),
 	}
 	foldersPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateFolders),
 	}
 	folderPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateFsConfig),
 		filepath.Join(templatesPath, templateAdminDir, templateFolder),
 	}
 	groupsPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateGroups),
 	}
 	groupPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateFsConfig),
-		filepath.Join(templatesPath, templateAdminDir, templateSharedComponents),
 		filepath.Join(templatesPath, templateAdminDir, templateGroup),
 	}
 	eventRulesPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateEventRules),
 	}
 	eventRulePaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateEventRule),
 	}
 	eventActionsPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateEventActions),
 	}
 	eventActionPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateEventAction),
 	}
 	statusPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateStatus),
 	}
 	loginPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
-		filepath.Join(templatesPath, templateAdminDir, templateBaseLogin),
-		filepath.Join(templatesPath, templateAdminDir, templateLogin),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBaseLogin),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonLogin),
 	}
 	maintenancePaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateMaintenance),
 	}
 	defenderPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateDefender),
 	}
 	ipListsPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateIPLists),
 	}
 	ipListPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateIPList),
 	}
 	mfaPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateMFA),
 	}
 	twoFactorPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
-		filepath.Join(templatesPath, templateAdminDir, templateBaseLogin),
-		filepath.Join(templatesPath, templateAdminDir, templateTwoFactor),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBaseLogin),
+		filepath.Join(templatesPath, templateCommonDir, templateTwoFactor),
 	}
 	twoFactorRecoveryPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
-		filepath.Join(templatesPath, templateAdminDir, templateBaseLogin),
-		filepath.Join(templatesPath, templateAdminDir, templateTwoFactorRecovery),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBaseLogin),
+		filepath.Join(templatesPath, templateCommonDir, templateTwoFactorRecovery),
 	}
 	setupPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
-		filepath.Join(templatesPath, templateAdminDir, templateBaseLogin),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBaseLogin),
 		filepath.Join(templatesPath, templateAdminDir, templateSetup),
 	}
 	forgotPwdPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBaseLogin),
 		filepath.Join(templatesPath, templateCommonDir, templateForgotPassword),
 	}
 	resetPwdPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBaseLogin),
 		filepath.Join(templatesPath, templateCommonDir, templateResetPassword),
 	}
 	rolesPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateRoles),
 	}
 	rolePaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateRole),
 	}
 	eventsPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateEvents),
 	}
 	configsPaths := []string{
-		filepath.Join(templatesPath, templateCommonDir, templateCommonCSS),
+		filepath.Join(templatesPath, templateCommonDir, templateCommonBase),
 		filepath.Join(templatesPath, templateAdminDir, templateBase),
 		filepath.Join(templatesPath, templateAdminDir, templateConfigs),
 	}
 
 	fsBaseTpl := template.New("fsBaseTemplate").Funcs(template.FuncMap{
-		"ListFSProviders": func() []sdk.FilesystemProvider {
-			return []sdk.FilesystemProvider{sdk.LocalFilesystemProvider, sdk.CryptedFilesystemProvider,
-				sdk.S3FilesystemProvider, sdk.GCSFilesystemProvider, sdk.AzureBlobFilesystemProvider,
-				sdk.SFTPFilesystemProvider, sdk.HTTPFilesystemProvider,
-			}
-		},
 		"HumanizeBytes": util.ByteCountSI,
 	})
 	usersTmpl := util.LoadTemplate(nil, usersPaths...)
@@ -636,7 +559,7 @@ func loadAdminTemplates(templatesPath string) {
 	adminTemplates[templateEventActions] = eventActionsTmpl
 	adminTemplates[templateEventAction] = eventActionTmpl
 	adminTemplates[templateStatus] = statusTmpl
-	adminTemplates[templateLogin] = loginTmpl
+	adminTemplates[templateCommonLogin] = loginTmpl
 	adminTemplates[templateProfile] = profileTmpl
 	adminTemplates[templateChangePwd] = changePwdTmpl
 	adminTemplates[templateMaintenance] = maintenanceTmpl
@@ -695,6 +618,7 @@ func (s *httpdServer) getBasePageData(title, currentURL string, r *http.Request)
 		csrfToken = createCSRFToken(util.GetIPFromRemoteAddress(r.RemoteAddr))
 	}
 	return basePage{
+		commonBasePage:      getCommonBasePage(r),
 		Title:               title,
 		CurrentURL:          currentURL,
 		UsersURL:            webUsersPath,
@@ -713,6 +637,7 @@ func (s *httpdServer) getBasePageData(title, currentURL string, r *http.Request)
 		EventsURL:           webEventsPath,
 		ConfigsURL:          webConfigsPath,
 		LogoutURL:           webLogoutPath,
+		LoginURL:            webAdminLoginPath,
 		ProfileURL:          webAdminProfilePath,
 		ChangePwdURL:        webChangeAdminPwdPath,
 		MFAURL:              webAdminMFAPath,
@@ -727,23 +652,7 @@ func (s *httpdServer) getBasePageData(title, currentURL string, r *http.Request)
 		StatusURL:           webStatusPath,
 		FolderQuotaScanURL:  webScanVFolderPath,
 		MaintenanceURL:      webMaintenancePath,
-		StaticURL:           webStaticFilesPath,
-		UsersTitle:          pageUsersTitle,
-		AdminsTitle:         pageAdminsTitle,
-		ConnectionsTitle:    pageConnectionsTitle,
-		FoldersTitle:        pageFoldersTitle,
-		GroupsTitle:         pageGroupsTitle,
-		EventRulesTitle:     pageEventRulesTitle,
-		EventActionsTitle:   pageEventActionsTitle,
-		RolesTitle:          pageRolesTitle,
-		StatusTitle:         pageStatusTitle,
-		MaintenanceTitle:    pageMaintenanceTitle,
-		DefenderTitle:       pageDefenderTitle,
-		IPListsTitle:        pageIPListsTitle,
-		EventsTitle:         pageEventsTitle,
-		ConfigsTitle:        pageConfigsTitle,
-		Version:             version.GetAsString(),
-		LoggedAdmin:         getAdminFromToken(r),
+		LoggedUser:          getAdminFromToken(r),
 		IsEventManagerPage:  isEventManagerResource(currentURL),
 		IsIPManagerPage:     isIPListsResource(currentURL),
 		IsServerManagerPage: isServerManagerResource(currentURL),
@@ -762,86 +671,92 @@ func renderAdminTemplate(w http.ResponseWriter, tmplName string, data any) {
 	}
 }
 
-func (s *httpdServer) renderMessagePage(w http.ResponseWriter, r *http.Request, title, body string, statusCode int,
-	err error, message string,
+func (s *httpdServer) renderMessagePageWithString(w http.ResponseWriter, r *http.Request, title string, statusCode int,
+	err error, message, text string,
 ) {
-	var errorString string
-	if body != "" {
-		errorString = body + " "
-	}
-	if err != nil {
-		errorString += err.Error()
-	}
 	data := messagePage{
 		basePage: s.getBasePageData(title, "", r),
-		Error:    errorString,
+		Error:    getI18nError(err),
 		Success:  message,
+		Text:     text,
 	}
 	w.WriteHeader(statusCode)
 	renderAdminTemplate(w, templateMessage, data)
 }
 
+func (s *httpdServer) renderMessagePage(w http.ResponseWriter, r *http.Request, title string, statusCode int,
+	err error, message string,
+) {
+	s.renderMessagePageWithString(w, r, title, statusCode, err, message, "")
+}
+
 func (s *httpdServer) renderInternalServerErrorPage(w http.ResponseWriter, r *http.Request, err error) {
-	s.renderMessagePage(w, r, page500Title, page500Body, http.StatusInternalServerError, err, "")
+	s.renderMessagePage(w, r, util.I18nError500Title, http.StatusInternalServerError,
+		util.NewI18nError(err, util.I18nError500Message), "")
 }
 
 func (s *httpdServer) renderBadRequestPage(w http.ResponseWriter, r *http.Request, err error) {
-	s.renderMessagePage(w, r, page400Title, "", http.StatusBadRequest, err, "")
+	s.renderMessagePage(w, r, util.I18nError400Title, http.StatusBadRequest,
+		util.NewI18nError(err, util.I18nError400Message), "")
 }
 
-func (s *httpdServer) renderForbiddenPage(w http.ResponseWriter, r *http.Request, body string) {
-	s.renderMessagePage(w, r, page403Title, "", http.StatusForbidden, nil, body)
+func (s *httpdServer) renderForbiddenPage(w http.ResponseWriter, r *http.Request, err error) {
+	s.renderMessagePage(w, r, util.I18nError403Title, http.StatusForbidden,
+		util.NewI18nError(err, util.I18nError403Message), "")
 }
 
 func (s *httpdServer) renderNotFoundPage(w http.ResponseWriter, r *http.Request, err error) {
-	s.renderMessagePage(w, r, page404Title, page404Body, http.StatusNotFound, err, "")
+	s.renderMessagePage(w, r, util.I18nError404Title, http.StatusNotFound,
+		util.NewI18nError(err, util.I18nError404Message), "")
 }
 
-func (s *httpdServer) renderForgotPwdPage(w http.ResponseWriter, error, ip string) {
+func (s *httpdServer) renderForgotPwdPage(w http.ResponseWriter, r *http.Request, err *util.I18nError, ip string) {
 	data := forgotPwdPage{
-		CurrentURL: webAdminForgotPwdPath,
-		Error:      error,
-		CSRFToken:  createCSRFToken(ip),
-		StaticURL:  webStaticFilesPath,
-		Title:      pageForgotPwdTitle,
-		Branding:   s.binding.Branding.WebAdmin,
+		commonBasePage: getCommonBasePage(r),
+		CurrentURL:     webAdminForgotPwdPath,
+		Error:          err,
+		CSRFToken:      createCSRFToken(ip),
+		LoginURL:       webAdminLoginPath,
+		Title:          util.I18nForgotPwdTitle,
+		Branding:       s.binding.Branding.WebAdmin,
 	}
 	renderAdminTemplate(w, templateForgotPassword, data)
 }
 
-func (s *httpdServer) renderResetPwdPage(w http.ResponseWriter, error, ip string) {
+func (s *httpdServer) renderResetPwdPage(w http.ResponseWriter, r *http.Request, err *util.I18nError, ip string) {
 	data := resetPwdPage{
-		CurrentURL: webAdminResetPwdPath,
-		Error:      error,
-		CSRFToken:  createCSRFToken(ip),
-		StaticURL:  webStaticFilesPath,
-		Title:      pageResetPwdTitle,
-		Branding:   s.binding.Branding.WebAdmin,
+		commonBasePage: getCommonBasePage(r),
+		CurrentURL:     webAdminResetPwdPath,
+		Error:          err,
+		CSRFToken:      createCSRFToken(ip),
+		LoginURL:       webAdminLoginPath,
+		Title:          util.I18nResetPwdTitle,
+		Branding:       s.binding.Branding.WebAdmin,
 	}
 	renderAdminTemplate(w, templateResetPassword, data)
 }
 
-func (s *httpdServer) renderTwoFactorPage(w http.ResponseWriter, error, ip string) {
+func (s *httpdServer) renderTwoFactorPage(w http.ResponseWriter, r *http.Request, err *util.I18nError, ip string) {
 	data := twoFactorPage{
-		CurrentURL:  webAdminTwoFactorPath,
-		Version:     version.Get().Version,
-		Error:       error,
-		CSRFToken:   createCSRFToken(ip),
-		StaticURL:   webStaticFilesPath,
-		RecoveryURL: webAdminTwoFactorRecoveryPath,
-		Branding:    s.binding.Branding.WebAdmin,
+		commonBasePage: getCommonBasePage(r),
+		Title:          pageTwoFactorTitle,
+		CurrentURL:     webAdminTwoFactorPath,
+		Error:          err,
+		CSRFToken:      createCSRFToken(ip),
+		RecoveryURL:    webAdminTwoFactorRecoveryPath,
+		Branding:       s.binding.Branding.WebAdmin,
 	}
 	renderAdminTemplate(w, templateTwoFactor, data)
 }
 
-func (s *httpdServer) renderTwoFactorRecoveryPage(w http.ResponseWriter, error, ip string) {
+func (s *httpdServer) renderTwoFactorRecoveryPage(w http.ResponseWriter, r *http.Request, err *util.I18nError, ip string) {
 	data := twoFactorPage{
-		CurrentURL: webAdminTwoFactorRecoveryPath,
-		Version:    version.Get().Version,
-		Error:      error,
-		CSRFToken:  createCSRFToken(ip),
-		StaticURL:  webStaticFilesPath,
-		Branding:   s.binding.Branding.WebAdmin,
+		commonBasePage: getCommonBasePage(r),
+		Title:          pageTwoFactorRecoveryTitle,
+		CurrentURL:     webAdminTwoFactorRecoveryPath,
+		Error:          err,
+		CSRFToken:      createCSRFToken(ip),
+		Branding:       s.binding.Branding.WebAdmin,
 	}
 	renderAdminTemplate(w, templateTwoFactorRecovery, data)
 }
@@ -855,21 +770,22 @@ func (s *httpdServer) renderMFAPage(w http.ResponseWriter, r *http.Request) {
 		SaveTOTPURL:     webAdminTOTPSavePath,
 		RecCodesURL:     webAdminRecoveryCodesPath,
 	}
-	admin, err := dataprovider.AdminExists(data.LoggedAdmin.Username)
+	admin, err := dataprovider.AdminExists(data.LoggedUser.Username)
 	if err != nil {
 		s.renderInternalServerErrorPage(w, r, err)
 		return
 	}
 	data.TOTPConfig = admin.Filters.TOTPConfig
+	data.RequireTwoFactor = admin.Filters.RequireTwoFactor
 	renderAdminTemplate(w, templateMFA, data)
 }
 
-func (s *httpdServer) renderProfilePage(w http.ResponseWriter, r *http.Request, error string) {
+func (s *httpdServer) renderProfilePage(w http.ResponseWriter, r *http.Request, err error) {
 	data := profilePage{
-		basePage: s.getBasePageData(pageProfileTitle, webAdminProfilePath, r),
-		Error:    error,
+		basePage: s.getBasePageData(util.I18nProfileTitle, webAdminProfilePath, r),
+		Error:    getI18nError(err),
 	}
-	admin, err := dataprovider.AdminExists(data.LoggedAdmin.Username)
+	admin, err := dataprovider.AdminExists(data.LoggedUser.Username)
 	if err != nil {
 		s.renderInternalServerErrorPage(w, r, err)
 		return
@@ -881,28 +797,28 @@ func (s *httpdServer) renderProfilePage(w http.ResponseWriter, r *http.Request, 
 	renderAdminTemplate(w, templateProfile, data)
 }
 
-func (s *httpdServer) renderChangePasswordPage(w http.ResponseWriter, r *http.Request, error string) {
+func (s *httpdServer) renderChangePasswordPage(w http.ResponseWriter, r *http.Request, err *util.I18nError) {
 	data := changePasswordPage{
-		basePage: s.getBasePageData(pageChangePwdTitle, webChangeAdminPwdPath, r),
-		Error:    error,
+		basePage: s.getBasePageData(util.I18nChangePwdTitle, webChangeAdminPwdPath, r),
+		Error:    err,
 	}
 
 	renderAdminTemplate(w, templateChangePwd, data)
 }
 
-func (s *httpdServer) renderMaintenancePage(w http.ResponseWriter, r *http.Request, error string) {
+func (s *httpdServer) renderMaintenancePage(w http.ResponseWriter, r *http.Request, err error) {
 	data := maintenancePage{
-		basePage:    s.getBasePageData(pageMaintenanceTitle, webMaintenancePath, r),
+		basePage:    s.getBasePageData(util.I18nMaintenanceTitle, webMaintenancePath, r),
 		BackupPath:  webBackupPath,
 		RestorePath: webRestorePath,
-		Error:       error,
+		Error:       getI18nError(err),
 	}
 
 	renderAdminTemplate(w, templateMaintenance, data)
 }
 
 func (s *httpdServer) renderConfigsPage(w http.ResponseWriter, r *http.Request, configs dataprovider.Configs,
-	error string, section int,
+	err error, section int,
 ) {
 	configs.SetNilsToEmpty()
 	if configs.SMTP.Port == 0 {
@@ -914,53 +830,57 @@ func (s *httpdServer) renderConfigsPage(w http.ResponseWriter, r *http.Request, 
 		configs.ACME.HTTP01Challenge.Port = 80
 	}
 	data := configsPage{
-		basePage:          s.getBasePageData(pageConfigsTitle, webConfigsPath, r),
+		basePage:          s.getBasePageData(util.I18nConfigsTitle, webConfigsPath, r),
 		Configs:           configs,
 		ConfigSection:     section,
 		RedactedSecret:    redactedSecret,
 		OAuth2TokenURL:    webOAuth2TokenPath,
 		OAuth2RedirectURL: webOAuth2RedirectPath,
-		Error:             error,
+		Error:             getI18nError(err),
 	}
 
 	renderAdminTemplate(w, templateConfigs, data)
 }
 
-func (s *httpdServer) renderAdminSetupPage(w http.ResponseWriter, r *http.Request, username, error string) {
+func (s *httpdServer) renderAdminSetupPage(w http.ResponseWriter, r *http.Request, username, ip string, err *util.I18nError) {
 	data := setupPage{
-		basePage:             s.getBasePageData(pageSetupTitle, webAdminSetupPath, r),
+		commonBasePage:       getCommonBasePage(r),
+		Title:                util.I18nSetupTitle,
+		CurrentURL:           webAdminSetupPath,
+		CSRFToken:            createCSRFToken(ip),
 		Username:             username,
 		HasInstallationCode:  installationCode != "",
 		InstallationCodeHint: installationCodeHint,
 		HideSupportLink:      hideSupportLink,
-		Error:                error,
+		Error:                err,
+		Branding:             s.binding.Branding.WebAdmin,
 	}
 
 	renderAdminTemplate(w, templateSetup, data)
 }
 
 func (s *httpdServer) renderAddUpdateAdminPage(w http.ResponseWriter, r *http.Request, admin *dataprovider.Admin,
-	error string, isAdd bool) {
-	groups, err := s.getWebGroups(w, r, defaultQueryLimit, true)
-	if err != nil {
+	err error, isAdd bool) {
+	groups, errGroups := s.getWebGroups(w, r, defaultQueryLimit, true)
+	if errGroups != nil {
 		return
 	}
-	roles, err := s.getWebRoles(w, r, 10, true)
-	if err != nil {
+	roles, errRoles := s.getWebRoles(w, r, 10, true)
+	if errRoles != nil {
 		return
 	}
 	currentURL := webAdminPath
-	title := "Add a new admin"
+	title := util.I18nAddAdminTitle
 	if !isAdd {
 		currentURL = fmt.Sprintf("%v/%v", webAdminPath, url.PathEscape(admin.Username))
-		title = "Update admin"
+		title = util.I18nUpdateAdminTitle
 	}
 	data := adminPage{
 		basePage: s.getBasePageData(title, currentURL, r),
 		Admin:    admin,
 		Groups:   groups,
 		Roles:    roles,
-		Error:    error,
+		Error:    getI18nError(err),
 		IsAdd:    isAdd,
 	}
 
@@ -971,20 +891,20 @@ func (s *httpdServer) getUserPageTitleAndURL(mode userPageMode, username string)
 	var title, currentURL string
 	switch mode {
 	case userPageModeAdd:
-		title = "Add a new user"
+		title = util.I18nAddUserTitle
 		currentURL = webUserPath
 	case userPageModeUpdate:
-		title = "Update user"
+		title = util.I18nUpdateUserTitle
 		currentURL = fmt.Sprintf("%v/%v", webUserPath, url.PathEscape(username))
 	case userPageModeTemplate:
-		title = "User template"
+		title = util.I18nTemplateUserTitle
 		currentURL = webTemplateUser
 	}
 	return title, currentURL
 }
 
 func (s *httpdServer) renderUserPage(w http.ResponseWriter, r *http.Request, user *dataprovider.User,
-	mode userPageMode, errorString string, admin *dataprovider.Admin,
+	mode userPageMode, err error, admin *dataprovider.Admin,
 ) {
 	user.SetEmptySecretsIfNil()
 	title, currentURL := s.getUserPageTitleAndURL(mode, user.Username)
@@ -1007,25 +927,25 @@ func (s *httpdServer) renderUserPage(w http.ResponseWriter, r *http.Request, use
 		}
 	}
 	var roles []dataprovider.Role
-	if basePage.LoggedAdmin.Role == "" {
-		var err error
-		roles, err = s.getWebRoles(w, r, 10, true)
-		if err != nil {
+	if basePage.LoggedUser.Role == "" {
+		var errRoles error
+		roles, errRoles = s.getWebRoles(w, r, 10, true)
+		if errRoles != nil {
 			return
 		}
 	}
-	folders, err := s.getWebVirtualFolders(w, r, defaultQueryLimit, true)
-	if err != nil {
+	folders, errFolders := s.getWebVirtualFolders(w, r, defaultQueryLimit, true)
+	if errFolders != nil {
 		return
 	}
-	groups, err := s.getWebGroups(w, r, defaultQueryLimit, true)
-	if err != nil {
+	groups, errGroups := s.getWebGroups(w, r, defaultQueryLimit, true)
+	if errGroups != nil {
 		return
 	}
 	data := userPage{
 		basePage:           basePage,
 		Mode:               mode,
-		Error:              errorString,
+		Error:              getI18nError(err),
 		User:               user,
 		ValidPerms:         dataprovider.ValidPerms,
 		ValidLoginMethods:  dataprovider.ValidLoginMethods,
@@ -1041,7 +961,7 @@ func (s *httpdServer) renderUserPage(w http.ResponseWriter, r *http.Request, use
 			Filesystem:      user.FsConfig,
 			IsUserPage:      true,
 			IsGroupPage:     false,
-			IsHidden:        basePage.LoggedAdmin.Filters.Preferences.HideFilesystem(),
+			IsHidden:        basePage.LoggedUser.Filters.Preferences.HideFilesystem(),
 			HasUsersBaseDir: dataprovider.HasUsersBaseDir(),
 			DirPath:         user.HomeDir,
 		},
@@ -1050,20 +970,20 @@ func (s *httpdServer) renderUserPage(w http.ResponseWriter, r *http.Request, use
 }
 
 func (s *httpdServer) renderIPListPage(w http.ResponseWriter, r *http.Request, entry dataprovider.IPListEntry,
-	mode genericPageMode, error string,
+	mode genericPageMode, err error,
 ) {
 	var title, currentURL string
 	switch mode {
 	case genericPageModeAdd:
-		title = "Add a new IP List entry"
+		title = util.I18nAddIPListTitle
 		currentURL = fmt.Sprintf("%s/%d", webIPListPath, entry.Type)
 	case genericPageModeUpdate:
-		title = "Update IP List entry"
+		title = util.I18nUpdateIPListTitle
 		currentURL = fmt.Sprintf("%s/%d/%s", webIPListPath, entry.Type, url.PathEscape(entry.IPOrNet))
 	}
 	data := ipListPage{
 		basePage: s.getBasePageData(title, currentURL, r),
-		Error:    error,
+		Error:    getI18nError(err),
 		Entry:    &entry,
 		Mode:     mode,
 	}
@@ -1071,20 +991,20 @@ func (s *httpdServer) renderIPListPage(w http.ResponseWriter, r *http.Request, e
 }
 
 func (s *httpdServer) renderRolePage(w http.ResponseWriter, r *http.Request, role dataprovider.Role,
-	mode genericPageMode, error string,
+	mode genericPageMode, err error,
 ) {
 	var title, currentURL string
 	switch mode {
 	case genericPageModeAdd:
-		title = "Add a new role"
+		title = util.I18nRoleAddTitle
 		currentURL = webAdminRolePath
 	case genericPageModeUpdate:
-		title = "Update role"
+		title = util.I18nRoleUpdateTitle
 		currentURL = fmt.Sprintf("%s/%s", webAdminRolePath, url.PathEscape(role.Name))
 	}
 	data := rolePage{
 		basePage: s.getBasePageData(title, currentURL, r),
-		Error:    error,
+		Error:    getI18nError(err),
 		Role:     &role,
 		Mode:     mode,
 	}
@@ -1092,10 +1012,10 @@ func (s *httpdServer) renderRolePage(w http.ResponseWriter, r *http.Request, rol
 }
 
 func (s *httpdServer) renderGroupPage(w http.ResponseWriter, r *http.Request, group dataprovider.Group,
-	mode genericPageMode, error string,
+	mode genericPageMode, err error,
 ) {
-	folders, err := s.getWebVirtualFolders(w, r, defaultQueryLimit, true)
-	if err != nil {
+	folders, errFolders := s.getWebVirtualFolders(w, r, defaultQueryLimit, true)
+	if errFolders != nil {
 		return
 	}
 	group.SetEmptySecretsIfNil()
@@ -1103,10 +1023,10 @@ func (s *httpdServer) renderGroupPage(w http.ResponseWriter, r *http.Request, gr
 	var title, currentURL string
 	switch mode {
 	case genericPageModeAdd:
-		title = "Add a new group"
+		title = util.I18nAddGroupTitle
 		currentURL = webGroupPath
 	case genericPageModeUpdate:
-		title = "Update group"
+		title = util.I18nUpdateGroupTitle
 		currentURL = fmt.Sprintf("%v/%v", webGroupPath, url.PathEscape(group.Name))
 	}
 	group.UserSettings.FsConfig.RedactedSecret = redactedSecret
@@ -1114,7 +1034,7 @@ func (s *httpdServer) renderGroupPage(w http.ResponseWriter, r *http.Request, gr
 
 	data := groupPage{
 		basePage:           s.getBasePageData(title, currentURL, r),
-		Error:              error,
+		Error:              getI18nError(err),
 		Group:              &group,
 		Mode:               mode,
 		ValidPerms:         dataprovider.ValidPerms,
@@ -1135,16 +1055,16 @@ func (s *httpdServer) renderGroupPage(w http.ResponseWriter, r *http.Request, gr
 }
 
 func (s *httpdServer) renderEventActionPage(w http.ResponseWriter, r *http.Request, action dataprovider.BaseEventAction,
-	mode genericPageMode, error string,
+	mode genericPageMode, err error,
 ) {
 	action.Options.SetEmptySecretsIfNil()
 	var title, currentURL string
 	switch mode {
 	case genericPageModeAdd:
-		title = "Add a new event action"
+		title = util.I18nAddActionTitle
 		currentURL = webAdminEventActionPath
 	case genericPageModeUpdate:
-		title = "Update event action"
+		title = util.I18nUpdateActionTitle
 		currentURL = fmt.Sprintf("%s/%s", webAdminEventActionPath, url.PathEscape(action.Name))
 	}
 	if action.Options.HTTPConfig.Timeout == 0 {
@@ -1164,26 +1084,26 @@ func (s *httpdServer) renderEventActionPage(w http.ResponseWriter, r *http.Reque
 		FsActions:      dataprovider.FsActionTypes,
 		HTTPMethods:    dataprovider.SupportedHTTPActionMethods,
 		RedactedSecret: redactedSecret,
-		Error:          error,
+		Error:          getI18nError(err),
 		Mode:           mode,
 	}
 	renderAdminTemplate(w, templateEventAction, data)
 }
 
 func (s *httpdServer) renderEventRulePage(w http.ResponseWriter, r *http.Request, rule dataprovider.EventRule,
-	mode genericPageMode, error string,
+	mode genericPageMode, err error,
 ) {
-	actions, err := s.getWebEventActions(w, r, defaultQueryLimit, true)
-	if err != nil {
+	actions, errActions := s.getWebEventActions(w, r, defaultQueryLimit, true)
+	if errActions != nil {
 		return
 	}
 	var title, currentURL string
 	switch mode {
 	case genericPageModeAdd:
-		title = "Add new event rules"
+		title = util.I18nAddRuleTitle
 		currentURL = webAdminEventRulePath
 	case genericPageModeUpdate:
-		title = "Update event rules"
+		title = util.I18nUpdateRuleTitle
 		currentURL = fmt.Sprintf("%v/%v", webAdminEventRulePath, url.PathEscape(rule.Name))
 	}
 
@@ -1196,7 +1116,7 @@ func (s *httpdServer) renderEventRulePage(w http.ResponseWriter, r *http.Request
 		Protocols:       dataprovider.SupportedRuleConditionProtocols,
 		ProviderEvents:  dataprovider.SupportedProviderEvents,
 		ProviderObjects: dataprovider.SupporteRuleConditionProviderObjects,
-		Error:           error,
+		Error:           getI18nError(err),
 		Mode:            mode,
 		IsShared:        s.isShared > 0,
 	}
@@ -1204,18 +1124,18 @@ func (s *httpdServer) renderEventRulePage(w http.ResponseWriter, r *http.Request
 }
 
 func (s *httpdServer) renderFolderPage(w http.ResponseWriter, r *http.Request, folder vfs.BaseVirtualFolder,
-	mode folderPageMode, error string,
+	mode folderPageMode, err error,
 ) {
 	var title, currentURL string
 	switch mode {
 	case folderPageModeAdd:
-		title = "Add a new folder"
+		title = util.I18nAddFolderTitle
 		currentURL = webFolderPath
 	case folderPageModeUpdate:
-		title = "Update folder"
+		title = util.I18nUpdateFolderTitle
 		currentURL = fmt.Sprintf("%v/%v", webFolderPath, url.PathEscape(folder.Name))
 	case folderPageModeTemplate:
-		title = "Folder template"
+		title = util.I18nTemplateFolderTitle
 		currentURL = webTemplateFolder
 	}
 	folder.FsConfig.RedactedSecret = redactedSecret
@@ -1223,7 +1143,7 @@ func (s *httpdServer) renderFolderPage(w http.ResponseWriter, r *http.Request, f
 
 	data := folderPage{
 		basePage: s.getBasePageData(title, currentURL, r),
-		Error:    error,
+		Error:    getI18nError(err),
 		Folder:   folder,
 		Mode:     mode,
 		FsWrapper: fsWrapper{
@@ -1239,6 +1159,11 @@ func (s *httpdServer) renderFolderPage(w http.ResponseWriter, r *http.Request, f
 
 func getFoldersForTemplate(r *http.Request) []string {
 	var res []string
+	for k := range r.Form {
+		if hasPrefixAndSuffix(k, "template_folders[", "][tpl_foldername]") {
+			r.Form.Add("tpl_foldername", r.Form.Get(k))
+		}
+	}
 	folderNames := r.Form["tpl_foldername"]
 	folders := make(map[string]bool)
 	for _, name := range folderNames {
@@ -1262,8 +1187,8 @@ func getUsersForTemplate(r *http.Request) []userTemplateFields {
 	tplPublicKeys := r.Form["tpl_public_keys"]
 
 	users := make(map[string]bool)
-	for idx, username := range tplUsernames {
-		username = strings.TrimSpace(username)
+	for idx := range tplUsernames {
+		username := tplUsernames[idx]
 		password := ""
 		publicKey := ""
 		if len(tplPasswords) > idx {
@@ -1297,7 +1222,6 @@ func getVirtualFoldersFromPostFields(r *http.Request) []vfs.VirtualFolder {
 	folderQuotaSizes := r.Form["vfolder_quota_size"]
 	folderQuotaFiles := r.Form["vfolder_quota_files"]
 	for idx, p := range folderPaths {
-		p = strings.TrimSpace(p)
 		name := ""
 		if len(folderNames) > idx {
 			name = folderNames[idx]
@@ -1318,7 +1242,7 @@ func getVirtualFoldersFromPostFields(r *http.Request) []vfs.VirtualFolder {
 				}
 			}
 			if len(folderQuotaFiles) > idx {
-				quotaFiles, err := strconv.Atoi(strings.TrimSpace(folderQuotaFiles[idx]))
+				quotaFiles, err := strconv.Atoi(folderQuotaFiles[idx])
 				if err == nil {
 					vfolder.QuotaFiles = quotaFiles
 				}
@@ -1333,13 +1257,9 @@ func getVirtualFoldersFromPostFields(r *http.Request) []vfs.VirtualFolder {
 func getSubDirPermissionsFromPostFields(r *http.Request) map[string][]string {
 	permissions := make(map[string][]string)
 
-	for k := range r.Form {
-		if strings.HasPrefix(k, "sub_perm_path") {
-			p := strings.TrimSpace(r.Form.Get(k))
-			if p != "" {
-				idx := strings.TrimPrefix(k, "sub_perm_path")
-				permissions[p] = r.Form[fmt.Sprintf("sub_perm_permissions%v", idx)]
-			}
+	for idx, p := range r.Form["sub_perm_path"] {
+		if p != "" {
+			permissions[p] = r.Form["sub_perm_permissions"+strconv.Itoa(idx)]
 		}
 	}
 
@@ -1353,35 +1273,71 @@ func getUserPermissionsFromPostFields(r *http.Request) map[string][]string {
 	return permissions
 }
 
+func getAccessTimeRestrictionsFromPostFields(r *http.Request) []sdk.TimePeriod {
+	var result []sdk.TimePeriod
+
+	dayOfWeeks := r.Form["access_time_day_of_week"]
+	starts := r.Form["access_time_start"]
+	ends := r.Form["access_time_end"]
+
+	for idx, dayOfWeek := range dayOfWeeks {
+		dayOfWeek = strings.TrimSpace(dayOfWeek)
+		start := ""
+		if len(starts) > idx {
+			start = strings.TrimSpace(starts[idx])
+		}
+		end := ""
+		if len(ends) > idx {
+			end = strings.TrimSpace(ends[idx])
+		}
+		dayNumber, err := strconv.Atoi(dayOfWeek)
+		if err == nil && start != "" && end != "" {
+			result = append(result, sdk.TimePeriod{
+				DayOfWeek: dayNumber,
+				From:      start,
+				To:        end,
+			})
+		}
+	}
+
+	return result
+}
+
 func getBandwidthLimitsFromPostFields(r *http.Request) ([]sdk.BandwidthLimit, error) {
 	var result []sdk.BandwidthLimit
+	bwSources := r.Form["bandwidth_limit_sources"]
+	uploadSources := r.Form["upload_bandwidth_source"]
+	downloadSources := r.Form["download_bandwidth_source"]
 
-	for k := range r.Form {
-		if strings.HasPrefix(k, "bandwidth_limit_sources") {
-			sources := getSliceFromDelimitedValues(r.Form.Get(k), ",")
-			if len(sources) > 0 {
-				bwLimit := sdk.BandwidthLimit{
-					Sources: sources,
-				}
-				idx := strings.TrimPrefix(k, "bandwidth_limit_sources")
-				ul := r.Form.Get(fmt.Sprintf("upload_bandwidth_source%v", idx))
-				dl := r.Form.Get(fmt.Sprintf("download_bandwidth_source%v", idx))
-				if ul != "" {
-					bandwidthUL, err := strconv.ParseInt(ul, 10, 64)
-					if err != nil {
-						return result, fmt.Errorf("invalid upload_bandwidth_source%v %q: %w", idx, ul, err)
-					}
-					bwLimit.UploadBandwidth = bandwidthUL
-				}
-				if dl != "" {
-					bandwidthDL, err := strconv.ParseInt(dl, 10, 64)
-					if err != nil {
-						return result, fmt.Errorf("invalid download_bandwidth_source%v %q: %w", idx, ul, err)
-					}
-					bwLimit.DownloadBandwidth = bandwidthDL
-				}
-				result = append(result, bwLimit)
+	for idx, bwSource := range bwSources {
+		sources := getSliceFromDelimitedValues(bwSource, ",")
+		if len(sources) > 0 {
+			bwLimit := sdk.BandwidthLimit{
+				Sources: sources,
 			}
+			ul := ""
+			dl := ""
+			if len(uploadSources) > idx {
+				ul = uploadSources[idx]
+			}
+			if len(downloadSources) > idx {
+				dl = downloadSources[idx]
+			}
+			if ul != "" {
+				bandwidthUL, err := strconv.ParseInt(ul, 10, 64)
+				if err != nil {
+					return result, fmt.Errorf("invalid upload_bandwidth_source%v %q: %w", idx, ul, err)
+				}
+				bwLimit.UploadBandwidth = bandwidthUL
+			}
+			if dl != "" {
+				bandwidthDL, err := strconv.ParseInt(dl, 10, 64)
+				if err != nil {
+					return result, fmt.Errorf("invalid download_bandwidth_source%v %q: %w", idx, ul, err)
+				}
+				bwLimit.DownloadBandwidth = bandwidthDL
+			}
+			result = append(result, bwLimit)
 		}
 	}
 
@@ -1398,28 +1354,28 @@ func getPatterDenyPolicyFromString(policy string) int {
 
 func getFilePatternsFromPostField(r *http.Request) []sdk.PatternsFilter {
 	var result []sdk.PatternsFilter
+	patternPaths := r.Form["pattern_path"]
+	patterns := r.Form["patterns"]
+	patternTypes := r.Form["pattern_type"]
+	policies := r.Form["pattern_policy"]
 
 	allowedPatterns := make(map[string][]string)
 	deniedPatterns := make(map[string][]string)
 	patternPolicies := make(map[string]string)
 
-	for k := range r.Form {
-		if strings.HasPrefix(k, "pattern_path") {
-			p := strings.TrimSpace(r.Form.Get(k))
-			idx := strings.TrimPrefix(k, "pattern_path")
-			filters := strings.TrimSpace(r.Form.Get(fmt.Sprintf("patterns%v", idx)))
-			filters = strings.ReplaceAll(filters, " ", "")
-			patternType := r.Form.Get(fmt.Sprintf("pattern_type%v", idx))
-			patternPolicy := r.Form.Get(fmt.Sprintf("pattern_policy%v", idx))
-			if p != "" && filters != "" {
-				if patternType == "allowed" {
-					allowedPatterns[p] = append(allowedPatterns[p], strings.Split(filters, ",")...)
-				} else {
-					deniedPatterns[p] = append(deniedPatterns[p], strings.Split(filters, ",")...)
-				}
-				if patternPolicy != "" && patternPolicy != "0" {
-					patternPolicies[p] = patternPolicy
-				}
+	for idx := range patternPaths {
+		p := patternPaths[idx]
+		filters := strings.ReplaceAll(patterns[idx], " ", "")
+		patternType := patternTypes[idx]
+		patternPolicy := policies[idx]
+		if p != "" && filters != "" {
+			if patternType == "allowed" {
+				allowedPatterns[p] = append(allowedPatterns[p], strings.Split(filters, ",")...)
+			} else {
+				deniedPatterns[p] = append(deniedPatterns[p], strings.Split(filters, ",")...)
+			}
+			if patternPolicy != "" && patternPolicy != "0" {
+				patternPolicies[p] = patternPolicy
 			}
 		}
 	}
@@ -1492,7 +1448,7 @@ func getFiltersFromUserPostFields(r *http.Request) (sdk.BaseUserFilters, error) 
 	}
 	maxFileSize, err := util.ParseBytes(r.Form.Get("max_upload_file_size"))
 	if err != nil {
-		return filters, fmt.Errorf("invalid max upload file size: %w", err)
+		return filters, util.NewI18nError(fmt.Errorf("invalid max upload file size: %w", err), util.I18nErrorInvalidMaxFilesize)
 	}
 	defaultSharesExpiration, err := strconv.Atoi(r.Form.Get("default_shares_expiration"))
 	if err != nil {
@@ -1526,6 +1482,7 @@ func getFiltersFromUserPostFields(r *http.Request) (sdk.BaseUserFilters, error) 
 	filters.MaxSharesExpiration = maxSharesExpiration
 	filters.PasswordExpiration = passwordExpiration
 	filters.PasswordStrength = passwordStrength
+	filters.AccessTime = getAccessTimeRestrictionsFromPostFields(r)
 	hooks := r.Form["hooks"]
 	if util.Contains(hooks, "external_auth_disabled") {
 		filters.Hooks.ExternalAuthDisabled = true
@@ -1588,6 +1545,7 @@ func getS3Config(r *http.Request) (vfs.S3FsConfig, error) {
 		return config, fmt.Errorf("invalid s3 download concurrency: %w", err)
 	}
 	config.ForcePathStyle = r.Form.Get("s3_force_path_style") != ""
+	config.SkipTLSVerify = r.Form.Get("s3_skip_tls_verify") != ""
 	config.DownloadPartMaxTime, err = strconv.Atoi(r.Form.Get("s3_download_part_max_time"))
 	if err != nil {
 		return config, fmt.Errorf("invalid s3 download part max time: %w", err)
@@ -1636,7 +1594,7 @@ func getGCSConfig(r *http.Request) (vfs.GCSFsConfig, error) {
 		}
 		return config, err
 	}
-	config.Credentials = kms.NewPlainSecret(string(fileBytes))
+	config.Credentials = kms.NewPlainSecret(util.BytesToString(fileBytes))
 	config.AutomaticCredentials = 0
 	return config, err
 }
@@ -1725,7 +1683,7 @@ func getOsConfigFromPostFields(r *http.Request, readBufferField, writeBufferFiel
 
 func getFsConfigFromPostFields(r *http.Request) (vfs.Filesystem, error) {
 	var fs vfs.Filesystem
-	fs.Provider = sdk.GetProviderByName(r.Form.Get("fs_provider"))
+	fs.Provider = dataprovider.GetProviderFromValue(r.Form.Get("fs_provider"))
 	switch fs.Provider {
 	case sdk.LocalFilesystemProvider:
 		fs.OSConfig = getOsConfigFromPostFields(r, "osfs_read_buffer_size", "osfs_write_buffer_size")
@@ -1791,7 +1749,7 @@ func getAdminFromPostFields(r *http.Request) (dataprovider.Admin, error) {
 	var admin dataprovider.Admin
 	err := r.ParseForm()
 	if err != nil {
-		return admin, err
+		return admin, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
 	status, err := strconv.Atoi(r.Form.Get("status"))
 	if err != nil {
@@ -1805,6 +1763,8 @@ func getAdminFromPostFields(r *http.Request) (dataprovider.Admin, error) {
 	admin.Role = strings.TrimSpace(r.Form.Get("role"))
 	admin.Filters.AllowList = getSliceFromDelimitedValues(r.Form.Get("allowed_ip"), ",")
 	admin.Filters.AllowAPIKeyAuth = r.Form.Get("allow_api_key_auth") != ""
+	admin.Filters.RequireTwoFactor = r.Form.Get("require_two_factor") != ""
+	admin.Filters.RequirePasswordChange = r.Form.Get("require_password_change") != ""
 	admin.AdditionalInfo = r.Form.Get("additional_info")
 	admin.Description = r.Form.Get("description")
 	admin.Filters.Preferences.HideUserPageSections = getAdminHiddenUserPageSections(r)
@@ -1817,14 +1777,14 @@ func getAdminFromPostFields(r *http.Request) (dataprovider.Admin, error) {
 		admin.Filters.Preferences.DefaultUsersExpiration = defaultUsersExpiration
 	}
 	for k := range r.Form {
-		if strings.HasPrefix(k, "group") {
+		if hasPrefixAndSuffix(k, "groups[", "][group]") {
 			groupName := strings.TrimSpace(r.Form.Get(k))
 			if groupName != "" {
-				idx := strings.TrimPrefix(k, "group")
-				addAsGroupType := r.Form.Get(fmt.Sprintf("add_as_group_type%s", idx))
 				group := dataprovider.AdminGroupMapping{
 					Name: groupName,
 				}
+				base, _ := strings.CutSuffix(k, "[group]")
+				addAsGroupType := strings.TrimSpace(r.Form.Get(base + "[group_type]"))
 				switch addAsGroupType {
 				case "1":
 					group.Options.AddToUsersAs = dataprovider.GroupAddToUsersAsPrimary
@@ -1982,7 +1942,7 @@ func getTransferLimits(r *http.Request) (int64, int64, int64, error) {
 func getQuotaLimits(r *http.Request) (int64, int, error) {
 	quotaSize, err := util.ParseBytes(r.Form.Get("quota_size"))
 	if err != nil {
-		return 0, 0, fmt.Errorf("invalid quota size: %w", err)
+		return 0, 0, util.NewI18nError(fmt.Errorf("invalid quota size: %w", err), util.I18nErrorInvalidQuotaSize)
 	}
 	quotaFiles, err := strconv.Atoi(r.Form.Get("quota_files"))
 	if err != nil {
@@ -1991,13 +1951,78 @@ func getQuotaLimits(r *http.Request) (int64, int, error) {
 	return quotaSize, quotaFiles, nil
 }
 
+func updateRepeaterFormFields(r *http.Request) {
+	for k := range r.Form {
+		if hasPrefixAndSuffix(k, "public_keys[", "][public_key]") {
+			key := r.Form.Get(k)
+			if strings.TrimSpace(key) != "" {
+				r.Form.Add("public_keys", key)
+			}
+			continue
+		}
+		if hasPrefixAndSuffix(k, "tls_certs[", "][tls_cert]") {
+			cert := strings.TrimSpace(r.Form.Get(k))
+			if cert != "" {
+				r.Form.Add("tls_certs", cert)
+			}
+			continue
+		}
+		if hasPrefixAndSuffix(k, "virtual_folders[", "][vfolder_path]") {
+			base, _ := strings.CutSuffix(k, "[vfolder_path]")
+			r.Form.Add("vfolder_path", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("vfolder_name", strings.TrimSpace(r.Form.Get(base+"[vfolder_name]")))
+			r.Form.Add("vfolder_quota_files", strings.TrimSpace(r.Form.Get(base+"[vfolder_quota_files]")))
+			r.Form.Add("vfolder_quota_size", strings.TrimSpace(r.Form.Get(base+"[vfolder_quota_size]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "directory_permissions[", "][sub_perm_path]") {
+			base, _ := strings.CutSuffix(k, "[sub_perm_path]")
+			r.Form.Add("sub_perm_path", strings.TrimSpace(r.Form.Get(k)))
+			r.Form["sub_perm_permissions"+strconv.Itoa(len(r.Form["sub_perm_path"])-1)] = r.Form[base+"[sub_perm_permissions][]"]
+			continue
+		}
+		if hasPrefixAndSuffix(k, "directory_patterns[", "][pattern_path]") {
+			base, _ := strings.CutSuffix(k, "[pattern_path]")
+			r.Form.Add("pattern_path", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("patterns", strings.TrimSpace(r.Form.Get(base+"[patterns]")))
+			r.Form.Add("pattern_type", strings.TrimSpace(r.Form.Get(base+"[pattern_type]")))
+			r.Form.Add("pattern_policy", strings.TrimSpace(r.Form.Get(base+"[pattern_policy]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "access_time_restrictions[", "][access_time_day_of_week]") {
+			base, _ := strings.CutSuffix(k, "[access_time_day_of_week]")
+			r.Form.Add("access_time_day_of_week", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("access_time_start", strings.TrimSpace(r.Form.Get(base+"[access_time_start]")))
+			r.Form.Add("access_time_end", strings.TrimSpace(r.Form.Get(base+"[access_time_end]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "src_bandwidth_limits[", "][bandwidth_limit_sources]") {
+			base, _ := strings.CutSuffix(k, "[bandwidth_limit_sources]")
+			r.Form.Add("bandwidth_limit_sources", r.Form.Get(k))
+			r.Form.Add("upload_bandwidth_source", strings.TrimSpace(r.Form.Get(base+"[upload_bandwidth_source]")))
+			r.Form.Add("download_bandwidth_source", strings.TrimSpace(r.Form.Get(base+"[download_bandwidth_source]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "template_users[", "][tpl_username]") {
+			base, _ := strings.CutSuffix(k, "[tpl_username]")
+			r.Form.Add("tpl_username", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("tpl_password", strings.TrimSpace(r.Form.Get(base+"[tpl_password]")))
+			r.Form.Add("tpl_public_keys", strings.TrimSpace(r.Form.Get(base+"[tpl_public_keys]")))
+			continue
+		}
+	}
+}
+
 func getUserFromPostFields(r *http.Request) (dataprovider.User, error) {
 	user := dataprovider.User{}
 	err := r.ParseMultipartForm(maxRequestSize)
 	if err != nil {
-		return user, err
+		return user, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
 	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+
+	updateRepeaterFormFields(r)
+
 	uid, err := strconv.Atoi(r.Form.Get("uid"))
 	if err != nil {
 		return user, fmt.Errorf("invalid uid: %w", err)
@@ -2047,6 +2072,7 @@ func getUserFromPostFields(r *http.Request) (dataprovider.User, error) {
 	if err != nil {
 		return user, err
 	}
+	filters.TLSCerts = r.Form["tls_certs"]
 	user = dataprovider.User{
 		BaseUser: sdk.BaseUser{
 			Username:             strings.TrimSpace(r.Form.Get("username")),
@@ -2086,9 +2112,11 @@ func getGroupFromPostFields(r *http.Request) (dataprovider.Group, error) {
 	group := dataprovider.Group{}
 	err := r.ParseMultipartForm(maxRequestSize)
 	if err != nil {
-		return group, err
+		return group, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
 	defer r.MultipartForm.RemoveAll() //nolint:errcheck
+
+	updateRepeaterFormFields(r)
 
 	maxSessions, err := strconv.Atoi(r.Form.Get("max_sessions"))
 	if err != nil {
@@ -2151,60 +2179,62 @@ func getGroupFromPostFields(r *http.Request) (dataprovider.Group, error) {
 
 func getKeyValsFromPostFields(r *http.Request, key, val string) []dataprovider.KeyValue {
 	var res []dataprovider.KeyValue
-	for k := range r.Form {
-		if strings.HasPrefix(k, key) {
-			formKey := r.Form.Get(k)
-			idx := strings.TrimPrefix(k, key)
-			formVal := strings.TrimSpace(r.Form.Get(fmt.Sprintf("%s%s", val, idx)))
-			if formKey != "" && formVal != "" {
-				res = append(res, dataprovider.KeyValue{
-					Key:   formKey,
-					Value: formVal,
-				})
-			}
+
+	keys := r.Form[key]
+	values := r.Form[val]
+
+	for idx, k := range keys {
+		v := values[idx]
+		if k != "" && v != "" {
+			res = append(res, dataprovider.KeyValue{
+				Key:   k,
+				Value: v,
+			})
 		}
 	}
+
 	return res
 }
 
 func getFoldersRetentionFromPostFields(r *http.Request) ([]dataprovider.FolderRetention, error) {
 	var res []dataprovider.FolderRetention
-	for k := range r.Form {
-		if strings.HasPrefix(k, "folder_retention_path") {
-			folderPath := strings.TrimSpace(r.Form.Get(k))
-			if folderPath != "" {
-				idx := strings.TrimPrefix(k, "folder_retention_path")
-				retention, err := strconv.Atoi(r.Form.Get(fmt.Sprintf("folder_retention_val%s", idx)))
-				if err != nil {
-					return nil, fmt.Errorf("invalid retention for path %q: %w", folderPath, err)
-				}
-				options := r.Form[fmt.Sprintf("folder_retention_options%s", idx)]
-				res = append(res, dataprovider.FolderRetention{
-					Path:                  folderPath,
-					Retention:             retention,
-					DeleteEmptyDirs:       util.Contains(options, "1"),
-					IgnoreUserPermissions: util.Contains(options, "2"),
-				})
+	paths := r.Form["folder_retention_path"]
+	values := r.Form["folder_retention_val"]
+
+	for idx, p := range paths {
+		if p != "" {
+			retention, err := strconv.Atoi(values[idx])
+			if err != nil {
+				return nil, fmt.Errorf("invalid retention for path %q: %w", p, err)
 			}
+			opts := r.Form["folder_retention_options"+strconv.Itoa(idx)]
+			res = append(res, dataprovider.FolderRetention{
+				Path:            p,
+				Retention:       retention,
+				DeleteEmptyDirs: util.Contains(opts, "1"),
+			})
 		}
 	}
+
 	return res, nil
 }
 
 func getHTTPPartsFromPostFields(r *http.Request) []dataprovider.HTTPPart {
 	var result []dataprovider.HTTPPart
-	for k := range r.Form {
-		if strings.HasPrefix(k, "http_part_name") {
-			partName := strings.TrimSpace(r.Form.Get(k))
-			if partName != "" {
-				idx := strings.TrimPrefix(k, "http_part_name")
-				order, err := strconv.Atoi(idx)
-				if err != nil {
-					continue
-				}
-				filePath := strings.TrimSpace(r.Form.Get(fmt.Sprintf("http_part_file%s", idx)))
-				body := r.Form.Get(fmt.Sprintf("http_part_body%s", idx))
-				concatHeaders := getSliceFromDelimitedValues(r.Form.Get(fmt.Sprintf("http_part_headers%s", idx)), "\n")
+
+	names := r.Form["http_part_name"]
+	files := r.Form["http_part_file"]
+	headers := r.Form["http_part_headers"]
+	bodies := r.Form["http_part_body"]
+	orders := r.Form["http_part_order"]
+
+	for idx, partName := range names {
+		if partName != "" {
+			order, err := strconv.Atoi(orders[idx])
+			if err == nil {
+				filePath := files[idx]
+				body := bodies[idx]
+				concatHeaders := getSliceFromDelimitedValues(headers[idx], "\n")
 				var headers []dataprovider.KeyValue
 				for _, h := range concatHeaders {
 					values := strings.SplitN(h, ":", 2)
@@ -2225,13 +2255,69 @@ func getHTTPPartsFromPostFields(r *http.Request) []dataprovider.HTTPPart {
 			}
 		}
 	}
+
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Order < result[j].Order
 	})
 	return result
 }
 
+func updateRepeaterFormActionFields(r *http.Request) {
+	for k := range r.Form {
+		if hasPrefixAndSuffix(k, "http_headers[", "][http_header_key]") {
+			base, _ := strings.CutSuffix(k, "[http_header_key]")
+			r.Form.Add("http_header_key", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("http_header_value", strings.TrimSpace(r.Form.Get(base+"[http_header_value]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "query_parameters[", "][http_query_key]") {
+			base, _ := strings.CutSuffix(k, "[http_query_key]")
+			r.Form.Add("http_query_key", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("http_query_value", strings.TrimSpace(r.Form.Get(base+"[http_query_value]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "multipart_body[", "][http_part_name]") {
+			base, _ := strings.CutSuffix(k, "[http_part_name]")
+			order, _ := strings.CutPrefix(k, "multipart_body[")
+			order, _ = strings.CutSuffix(order, "][http_part_name]")
+			r.Form.Add("http_part_name", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("http_part_file", strings.TrimSpace(r.Form.Get(base+"[http_part_file]")))
+			r.Form.Add("http_part_headers", strings.TrimSpace(r.Form.Get(base+"[http_part_headers]")))
+			r.Form.Add("http_part_body", strings.TrimSpace(r.Form.Get(base+"[http_part_body]")))
+			r.Form.Add("http_part_order", order)
+			continue
+		}
+		if hasPrefixAndSuffix(k, "env_vars[", "][cmd_env_key]") {
+			base, _ := strings.CutSuffix(k, "[cmd_env_key]")
+			r.Form.Add("cmd_env_key", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("cmd_env_value", strings.TrimSpace(r.Form.Get(base+"[cmd_env_value]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "data_retention[", "][folder_retention_path]") {
+			base, _ := strings.CutSuffix(k, "[folder_retention_path]")
+			r.Form.Add("folder_retention_path", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("folder_retention_val", strings.TrimSpace(r.Form.Get(base+"[folder_retention_val]")))
+			r.Form["folder_retention_options"+strconv.Itoa(len(r.Form["folder_retention_path"])-1)] =
+				r.Form[base+"[folder_retention_options][]"]
+			continue
+		}
+		if hasPrefixAndSuffix(k, "fs_rename[", "][fs_rename_source]") {
+			base, _ := strings.CutSuffix(k, "[fs_rename_source]")
+			r.Form.Add("fs_rename_source", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("fs_rename_target", strings.TrimSpace(r.Form.Get(base+"[fs_rename_target]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "fs_copy[", "][fs_copy_source]") {
+			base, _ := strings.CutSuffix(k, "[fs_copy_source]")
+			r.Form.Add("fs_copy_source", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("fs_copy_target", strings.TrimSpace(r.Form.Get(base+"[fs_copy_target]")))
+			continue
+		}
+	}
+}
+
 func getEventActionOptionsFromPostFields(r *http.Request) (dataprovider.BaseEventActionOptions, error) {
+	updateRepeaterFormActionFields(r)
 	httpTimeout, err := strconv.Atoi(r.Form.Get("http_timeout"))
 	if err != nil {
 		return dataprovider.BaseEventActionOptions{}, fmt.Errorf("invalid http timeout: %w", err)
@@ -2251,6 +2337,13 @@ func getEventActionOptionsFromPostFields(r *http.Request) (dataprovider.BaseEven
 	pwdExpirationThreshold, err := strconv.Atoi(r.Form.Get("pwd_expiration_threshold"))
 	if err != nil {
 		return dataprovider.BaseEventActionOptions{}, fmt.Errorf("invalid password expiration threshold: %w", err)
+	}
+	var disableThreshold, deleteThreshold int
+	if val, err := strconv.Atoi(r.Form.Get("inactivity_disable_threshold")); err == nil {
+		disableThreshold = val
+	}
+	if val, err := strconv.Atoi(r.Form.Get("inactivity_delete_threshold")); err == nil {
+		deleteThreshold = val
 	}
 	var emailAttachments []string
 	if r.Form.Get("email_attachments") != "" {
@@ -2273,11 +2366,11 @@ func getEventActionOptionsFromPostFields(r *http.Request) (dataprovider.BaseEven
 			Endpoint:        strings.TrimSpace(r.Form.Get("http_endpoint")),
 			Username:        strings.TrimSpace(r.Form.Get("http_username")),
 			Password:        getSecretFromFormField(r, "http_password"),
-			Headers:         getKeyValsFromPostFields(r, "http_header_key", "http_header_val"),
+			Headers:         getKeyValsFromPostFields(r, "http_header_key", "http_header_value"),
 			Timeout:         httpTimeout,
 			SkipTLSVerify:   r.Form.Get("http_skip_tls_verify") != "",
 			Method:          r.Form.Get("http_method"),
-			QueryParameters: getKeyValsFromPostFields(r, "http_query_key", "http_query_val"),
+			QueryParameters: getKeyValsFromPostFields(r, "http_query_key", "http_query_value"),
 			Body:            r.Form.Get("http_body"),
 			Parts:           getHTTPPartsFromPostFields(r),
 		},
@@ -2285,7 +2378,7 @@ func getEventActionOptionsFromPostFields(r *http.Request) (dataprovider.BaseEven
 			Cmd:     strings.TrimSpace(r.Form.Get("cmd_path")),
 			Args:    cmdArgs,
 			Timeout: cmdTimeout,
-			EnvVars: getKeyValsFromPostFields(r, "cmd_env_key", "cmd_env_val"),
+			EnvVars: getKeyValsFromPostFields(r, "cmd_env_key", "cmd_env_value"),
 		},
 		EmailConfig: dataprovider.EventActionEmailConfig{
 			Recipients:  getSliceFromDelimitedValues(r.Form.Get("email_recipients"), ","),
@@ -2313,6 +2406,10 @@ func getEventActionOptionsFromPostFields(r *http.Request) (dataprovider.BaseEven
 		PwdExpirationConfig: dataprovider.EventActionPasswordExpiration{
 			Threshold: pwdExpirationThreshold,
 		},
+		UserInactivityConfig: dataprovider.EventActionUserInactivity{
+			DisableThreshold: disableThreshold,
+			DeleteThreshold:  deleteThreshold,
+		},
 		IDPConfig: dataprovider.EventActionIDPAccountCheck{
 			Mode:          idpMode,
 			TemplateUser:  strings.TrimSpace(r.Form.Get("idp_user")),
@@ -2325,7 +2422,7 @@ func getEventActionOptionsFromPostFields(r *http.Request) (dataprovider.BaseEven
 func getEventActionFromPostFields(r *http.Request) (dataprovider.BaseEventAction, error) {
 	err := r.ParseForm()
 	if err != nil {
-		return dataprovider.BaseEventAction{}, err
+		return dataprovider.BaseEventAction{}, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
 	actionType, err := strconv.Atoi(r.Form.Get("type"))
 	if err != nil {
@@ -2358,74 +2455,66 @@ func getIDPLoginEventFromPostField(r *http.Request) int {
 func getEventRuleConditionsFromPostFields(r *http.Request) (dataprovider.EventConditions, error) {
 	var schedules []dataprovider.Schedule
 	var names, groupNames, roleNames, fsPaths []dataprovider.ConditionPattern
-	for k := range r.Form {
-		if strings.HasPrefix(k, "schedule_hour") {
-			hour := strings.TrimSpace(r.Form.Get(k))
-			if hour != "" {
-				idx := strings.TrimPrefix(k, "schedule_hour")
-				dayOfWeek := strings.TrimSpace(r.Form.Get(fmt.Sprintf("schedule_day_of_week%s", idx)))
-				dayOfMonth := strings.TrimSpace(r.Form.Get(fmt.Sprintf("schedule_day_of_month%s", idx)))
-				month := strings.TrimSpace(r.Form.Get(fmt.Sprintf("schedule_month%s", idx)))
-				schedules = append(schedules, dataprovider.Schedule{
-					Hours:      hour,
-					DayOfWeek:  dayOfWeek,
-					DayOfMonth: dayOfMonth,
-					Month:      month,
-				})
-			}
-		}
-		if strings.HasPrefix(k, "name_pattern") {
-			pattern := strings.TrimSpace(r.Form.Get(k))
-			if pattern != "" {
-				idx := strings.TrimPrefix(k, "name_pattern")
-				patternType := r.Form.Get(fmt.Sprintf("type_name_pattern%s", idx))
-				names = append(names, dataprovider.ConditionPattern{
-					Pattern:      pattern,
-					InverseMatch: patternType == inversePatternType,
-				})
-			}
-		}
-		if strings.HasPrefix(k, "group_name_pattern") {
-			pattern := strings.TrimSpace(r.Form.Get(k))
-			if pattern != "" {
-				idx := strings.TrimPrefix(k, "group_name_pattern")
-				patternType := r.Form.Get(fmt.Sprintf("type_group_name_pattern%s", idx))
-				groupNames = append(groupNames, dataprovider.ConditionPattern{
-					Pattern:      pattern,
-					InverseMatch: patternType == inversePatternType,
-				})
-			}
-		}
-		if strings.HasPrefix(k, "role_name_pattern") {
-			pattern := strings.TrimSpace(r.Form.Get(k))
-			if pattern != "" {
-				idx := strings.TrimPrefix(k, "role_name_pattern")
-				patternType := r.Form.Get(fmt.Sprintf("type_role_name_pattern%s", idx))
-				roleNames = append(roleNames, dataprovider.ConditionPattern{
-					Pattern:      pattern,
-					InverseMatch: patternType == inversePatternType,
-				})
-			}
-		}
-		if strings.HasPrefix(k, "fs_path_pattern") {
-			pattern := strings.TrimSpace(r.Form.Get(k))
-			if pattern != "" {
-				idx := strings.TrimPrefix(k, "fs_path_pattern")
-				patternType := r.Form.Get(fmt.Sprintf("type_fs_path_pattern%s", idx))
-				fsPaths = append(fsPaths, dataprovider.ConditionPattern{
-					Pattern:      pattern,
-					InverseMatch: patternType == inversePatternType,
-				})
-			}
+
+	scheduleHours := r.Form["schedule_hour"]
+	scheduleDayOfWeeks := r.Form["schedule_day_of_week"]
+	scheduleDayOfMonths := r.Form["schedule_day_of_month"]
+	scheduleMonths := r.Form["schedule_month"]
+
+	for idx, hour := range scheduleHours {
+		if hour != "" {
+			schedules = append(schedules, dataprovider.Schedule{
+				Hours:      hour,
+				DayOfWeek:  scheduleDayOfWeeks[idx],
+				DayOfMonth: scheduleDayOfMonths[idx],
+				Month:      scheduleMonths[idx],
+			})
 		}
 	}
+
+	for idx, name := range r.Form["name_pattern"] {
+		if name != "" {
+			names = append(names, dataprovider.ConditionPattern{
+				Pattern:      name,
+				InverseMatch: r.Form["type_name_pattern"][idx] == inversePatternType,
+			})
+		}
+	}
+
+	for idx, name := range r.Form["group_name_pattern"] {
+		if name != "" {
+			groupNames = append(groupNames, dataprovider.ConditionPattern{
+				Pattern:      name,
+				InverseMatch: r.Form["type_group_name_pattern"][idx] == inversePatternType,
+			})
+		}
+	}
+
+	for idx, name := range r.Form["role_name_pattern"] {
+		if name != "" {
+			roleNames = append(roleNames, dataprovider.ConditionPattern{
+				Pattern:      name,
+				InverseMatch: r.Form["type_role_name_pattern"][idx] == inversePatternType,
+			})
+		}
+	}
+
+	for idx, name := range r.Form["fs_path_pattern"] {
+		if name != "" {
+			fsPaths = append(fsPaths, dataprovider.ConditionPattern{
+				Pattern:      name,
+				InverseMatch: r.Form["type_fs_path_pattern"][idx] == inversePatternType,
+			})
+		}
+	}
+
 	minFileSize, err := util.ParseBytes(r.Form.Get("fs_min_size"))
 	if err != nil {
-		return dataprovider.EventConditions{}, fmt.Errorf("invalid min file size: %w", err)
+		return dataprovider.EventConditions{}, util.NewI18nError(fmt.Errorf("invalid min file size: %w", err), util.I18nErrorInvalidMinSize)
 	}
 	maxFileSize, err := util.ParseBytes(r.Form.Get("fs_max_size"))
 	if err != nil {
-		return dataprovider.EventConditions{}, fmt.Errorf("invalid max file size: %w", err)
+		return dataprovider.EventConditions{}, util.NewI18nError(fmt.Errorf("invalid max file size: %w", err), util.I18nErrorInvalidMaxSize)
 	}
 	conditions := dataprovider.EventConditions{
 		FsEvents:       r.Form["fs_events"],
@@ -2447,18 +2536,17 @@ func getEventRuleConditionsFromPostFields(r *http.Request) (dataprovider.EventCo
 	return conditions, nil
 }
 
-func getEventRuleActionsFromPostFields(r *http.Request) ([]dataprovider.EventAction, error) {
+func getEventRuleActionsFromPostFields(r *http.Request) []dataprovider.EventAction {
 	var actions []dataprovider.EventAction
-	for k := range r.Form {
-		if strings.HasPrefix(k, "action_name") {
-			name := strings.TrimSpace(r.Form.Get(k))
-			if name != "" {
-				idx := strings.TrimPrefix(k, "action_name")
-				order, err := strconv.Atoi(r.Form.Get(fmt.Sprintf("action_order%s", idx)))
-				if err != nil {
-					return actions, fmt.Errorf("invalid order: %w", err)
-				}
-				options := r.Form[fmt.Sprintf("action_options%s", idx)]
+
+	names := r.Form["action_name"]
+	orders := r.Form["action_order"]
+
+	for idx, name := range names {
+		if name != "" {
+			order, err := strconv.Atoi(orders[idx])
+			if err == nil {
+				options := r.Form["action_options"+strconv.Itoa(idx)]
 				actions = append(actions, dataprovider.EventAction{
 					BaseEventAction: dataprovider.BaseEventAction{
 						Name: name,
@@ -2473,14 +2561,62 @@ func getEventRuleActionsFromPostFields(r *http.Request) ([]dataprovider.EventAct
 			}
 		}
 	}
-	return actions, nil
+
+	return actions
+}
+
+func updateRepeaterFormRuleFields(r *http.Request) {
+	for k := range r.Form {
+		if hasPrefixAndSuffix(k, "schedules[", "][schedule_hour]") {
+			base, _ := strings.CutSuffix(k, "[schedule_hour]")
+			r.Form.Add("schedule_hour", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("schedule_day_of_week", strings.TrimSpace(r.Form.Get(base+"[schedule_day_of_week]")))
+			r.Form.Add("schedule_day_of_month", strings.TrimSpace(r.Form.Get(base+"[schedule_day_of_month]")))
+			r.Form.Add("schedule_month", strings.TrimSpace(r.Form.Get(base+"[schedule_month]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "name_filters[", "][name_pattern]") {
+			base, _ := strings.CutSuffix(k, "[name_pattern]")
+			r.Form.Add("name_pattern", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("type_name_pattern", strings.TrimSpace(r.Form.Get(base+"[type_name_pattern]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "group_name_filters[", "][group_name_pattern]") {
+			base, _ := strings.CutSuffix(k, "[group_name_pattern]")
+			r.Form.Add("group_name_pattern", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("type_group_name_pattern", strings.TrimSpace(r.Form.Get(base+"[type_group_name_pattern]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "role_name_filters[", "][role_name_pattern]") {
+			base, _ := strings.CutSuffix(k, "[role_name_pattern]")
+			r.Form.Add("role_name_pattern", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("type_role_name_pattern", strings.TrimSpace(r.Form.Get(base+"[type_role_name_pattern]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "path_filters[", "][fs_path_pattern]") {
+			base, _ := strings.CutSuffix(k, "[fs_path_pattern]")
+			r.Form.Add("fs_path_pattern", strings.TrimSpace(r.Form.Get(k)))
+			r.Form.Add("type_fs_path_pattern", strings.TrimSpace(r.Form.Get(base+"[type_fs_path_pattern]")))
+			continue
+		}
+		if hasPrefixAndSuffix(k, "actions[", "][action_name]") {
+			base, _ := strings.CutSuffix(k, "[action_name]")
+			order, _ := strings.CutPrefix(k, "actions[")
+			order, _ = strings.CutSuffix(order, "][action_name]")
+			r.Form.Add("action_name", strings.TrimSpace(r.Form.Get(k)))
+			r.Form["action_options"+strconv.Itoa(len(r.Form["action_name"])-1)] = r.Form[base+"[action_options][]"]
+			r.Form.Add("action_order", order)
+			continue
+		}
+	}
 }
 
 func getEventRuleFromPostFields(r *http.Request) (dataprovider.EventRule, error) {
 	err := r.ParseForm()
 	if err != nil {
-		return dataprovider.EventRule{}, err
+		return dataprovider.EventRule{}, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
+	updateRepeaterFormRuleFields(r)
 	status, err := strconv.Atoi(r.Form.Get("status"))
 	if err != nil {
 		return dataprovider.EventRule{}, fmt.Errorf("invalid status: %w", err)
@@ -2493,17 +2629,13 @@ func getEventRuleFromPostFields(r *http.Request) (dataprovider.EventRule, error)
 	if err != nil {
 		return dataprovider.EventRule{}, err
 	}
-	actions, err := getEventRuleActionsFromPostFields(r)
-	if err != nil {
-		return dataprovider.EventRule{}, err
-	}
 	rule := dataprovider.EventRule{
 		Name:        strings.TrimSpace(r.Form.Get("name")),
 		Status:      status,
 		Description: r.Form.Get("description"),
 		Trigger:     trigger,
 		Conditions:  conditions,
-		Actions:     actions,
+		Actions:     getEventRuleActionsFromPostFields(r),
 	}
 	return rule, nil
 }
@@ -2511,7 +2643,7 @@ func getEventRuleFromPostFields(r *http.Request) (dataprovider.EventRule, error)
 func getRoleFromPostFields(r *http.Request) (dataprovider.Role, error) {
 	err := r.ParseForm()
 	if err != nil {
-		return dataprovider.Role{}, err
+		return dataprovider.Role{}, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
 
 	return dataprovider.Role{
@@ -2523,7 +2655,7 @@ func getRoleFromPostFields(r *http.Request) (dataprovider.Role, error) {
 func getIPListEntryFromPostFields(r *http.Request, listType dataprovider.IPListType) (dataprovider.IPListEntry, error) {
 	err := r.ParseForm()
 	if err != nil {
-		return dataprovider.IPListEntry{}, err
+		return dataprovider.IPListEntry{}, util.NewI18nError(err, util.I18nErrorInvalidForm)
 	}
 	var mode int
 	if listType == dataprovider.IPListTypeDefender {
@@ -2552,11 +2684,11 @@ func getIPListEntryFromPostFields(r *http.Request, listType dataprovider.IPListT
 
 func getSFTPConfigsFromPostFields(r *http.Request) *dataprovider.SFTPDConfigs {
 	return &dataprovider.SFTPDConfigs{
-		HostKeyAlgos:  r.Form["sftp_host_key_algos"],
-		Moduli:        getSliceFromDelimitedValues(r.Form.Get("sftp_moduli"), ","),
-		KexAlgorithms: r.Form["sftp_kex_algos"],
-		Ciphers:       r.Form["sftp_ciphers"],
-		MACs:          r.Form["sftp_macs"],
+		HostKeyAlgos:   r.Form["sftp_host_key_algos"],
+		PublicKeyAlgos: r.Form["sftp_pub_key_algos"],
+		KexAlgorithms:  r.Form["sftp_kex_algos"],
+		Ciphers:        r.Form["sftp_ciphers"],
+		MACs:           r.Form["sftp_macs"],
 	}
 }
 
@@ -2632,7 +2764,7 @@ func (s *httpdServer) handleWebAdminForgotPwd(w http.ResponseWriter, r *http.Req
 		s.renderNotFoundPage(w, r, errors.New("this page does not exist"))
 		return
 	}
-	s.renderForgotPwdPage(w, "", util.GetIPFromRemoteAddress(r.RemoteAddr))
+	s.renderForgotPwdPage(w, r, nil, util.GetIPFromRemoteAddress(r.RemoteAddr))
 }
 
 func (s *httpdServer) handleWebAdminForgotPwdPost(w http.ResponseWriter, r *http.Request) {
@@ -2641,20 +2773,16 @@ func (s *httpdServer) handleWebAdminForgotPwdPost(w http.ResponseWriter, r *http
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	err := r.ParseForm()
 	if err != nil {
-		s.renderForgotPwdPage(w, err.Error(), ipAddr)
+		s.renderForgotPwdPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm), ipAddr)
 		return
 	}
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	err = handleForgotPassword(r, r.Form.Get("username"), true)
 	if err != nil {
-		if e, ok := err.(*util.ValidationError); ok {
-			s.renderForgotPwdPage(w, e.GetErrorString(), ipAddr)
-			return
-		}
-		s.renderForgotPwdPage(w, err.Error(), ipAddr)
+		s.renderForgotPwdPage(w, r, util.NewI18nError(err, util.I18nErrorPwdResetGeneric), ipAddr)
 		return
 	}
 	http.Redirect(w, r, webAdminResetPwdPath, http.StatusFound)
@@ -2666,17 +2794,17 @@ func (s *httpdServer) handleWebAdminPasswordReset(w http.ResponseWriter, r *http
 		s.renderNotFoundPage(w, r, errors.New("this page does not exist"))
 		return
 	}
-	s.renderResetPwdPage(w, "", util.GetIPFromRemoteAddress(r.RemoteAddr))
+	s.renderResetPwdPage(w, r, nil, util.GetIPFromRemoteAddress(r.RemoteAddr))
 }
 
 func (s *httpdServer) handleWebAdminTwoFactor(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	s.renderTwoFactorPage(w, "", util.GetIPFromRemoteAddress(r.RemoteAddr))
+	s.renderTwoFactorPage(w, r, nil, util.GetIPFromRemoteAddress(r.RemoteAddr))
 }
 
 func (s *httpdServer) handleWebAdminTwoFactorRecovery(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	s.renderTwoFactorRecoveryPage(w, "", util.GetIPFromRemoteAddress(r.RemoteAddr))
+	s.renderTwoFactorRecoveryPage(w, r, nil, util.GetIPFromRemoteAddress(r.RemoteAddr))
 }
 
 func (s *httpdServer) handleWebAdminMFA(w http.ResponseWriter, r *http.Request) {
@@ -2686,34 +2814,34 @@ func (s *httpdServer) handleWebAdminMFA(w http.ResponseWriter, r *http.Request) 
 
 func (s *httpdServer) handleWebAdminProfile(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	s.renderProfilePage(w, r, "")
+	s.renderProfilePage(w, r, nil)
 }
 
 func (s *httpdServer) handleWebAdminChangePwd(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	s.renderChangePasswordPage(w, r, "")
+	s.renderChangePasswordPage(w, r, nil)
 }
 
 func (s *httpdServer) handleWebAdminProfilePost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	err := r.ParseForm()
 	if err != nil {
-		s.renderProfilePage(w, r, err.Error())
+		s.renderProfilePage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderProfilePage(w, r, "Invalid token claims")
+		s.renderProfilePage(w, r, util.NewI18nError(err, util.I18nErrorInvalidToken))
 		return
 	}
 	admin, err := dataprovider.AdminExists(claims.Username)
 	if err != nil {
-		s.renderProfilePage(w, r, err.Error())
+		s.renderProfilePage(w, r, err)
 		return
 	}
 	admin.Filters.AllowAPIKeyAuth = r.Form.Get("allow_api_key_auth") != ""
@@ -2721,50 +2849,49 @@ func (s *httpdServer) handleWebAdminProfilePost(w http.ResponseWriter, r *http.R
 	admin.Description = r.Form.Get("description")
 	err = dataprovider.UpdateAdmin(&admin, dataprovider.ActionExecutorSelf, ipAddr, admin.Role)
 	if err != nil {
-		s.renderProfilePage(w, r, err.Error())
+		s.renderProfilePage(w, r, err)
 		return
 	}
-	s.renderMessagePage(w, r, "Profile updated", "", http.StatusOK, nil,
-		"Your profile has been successfully updated")
+	s.renderMessagePage(w, r, util.I18nProfileTitle, http.StatusOK, nil, util.I18nProfileUpdated)
 }
 
 func (s *httpdServer) handleWebMaintenance(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	s.renderMaintenancePage(w, r, "")
+	s.renderMaintenancePage(w, r, nil)
 }
 
 func (s *httpdServer) handleWebRestore(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRestoreSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	err = r.ParseMultipartForm(MaxRestoreSize)
 	if err != nil {
-		s.renderMaintenancePage(w, r, err.Error())
+		s.renderMaintenancePage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
 	defer r.MultipartForm.RemoveAll() //nolint:errcheck
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	restoreMode, err := strconv.Atoi(r.Form.Get("mode"))
 	if err != nil {
-		s.renderMaintenancePage(w, r, err.Error())
+		s.renderMaintenancePage(w, r, err)
 		return
 	}
 	scanQuota, err := strconv.Atoi(r.Form.Get("quota"))
 	if err != nil {
-		s.renderMaintenancePage(w, r, err.Error())
+		s.renderMaintenancePage(w, r, err)
 		return
 	}
 	backupFile, _, err := r.FormFile("backup_file")
 	if err != nil {
-		s.renderMaintenancePage(w, r, err.Error())
+		s.renderMaintenancePage(w, r, util.NewI18nError(err, util.I18nErrorBackupFile))
 		return
 	}
 	defer backupFile.Close()
@@ -2774,44 +2901,42 @@ func (s *httpdServer) handleWebRestore(w http.ResponseWriter, r *http.Request) {
 		if len(backupContent) == 0 {
 			err = errors.New("backup file size must be greater than 0")
 		}
-		s.renderMaintenancePage(w, r, err.Error())
+		s.renderMaintenancePage(w, r, util.NewI18nError(err, util.I18nErrorBackupFile))
 		return
 	}
 
 	if err := restoreBackup(backupContent, "", scanQuota, restoreMode, claims.Username, ipAddr, claims.Role); err != nil {
-		s.renderMaintenancePage(w, r, err.Error())
+		s.renderMaintenancePage(w, r, util.NewI18nError(err, util.I18nErrorRestore))
 		return
 	}
 
-	s.renderMessagePage(w, r, "Data restored", "", http.StatusOK, nil, "Your backup was successfully restored")
+	s.renderMessagePage(w, r, util.I18nMaintenanceTitle, http.StatusOK, nil, util.I18nBackupOK)
+}
+
+func getAllAdmins(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	claims, err := getTokenClaims(r)
+	if err != nil || claims.Username == "" {
+		sendAPIResponse(w, r, nil, util.I18nErrorInvalidToken, http.StatusForbidden)
+		return
+	}
+
+	dataGetter := func(limit, offset int) ([]byte, int, error) {
+		results, err := dataprovider.GetAdmins(limit, offset, dataprovider.OrderASC)
+		if err != nil {
+			return nil, 0, err
+		}
+		data, err := json.Marshal(results)
+		return data, len(results), err
+	}
+
+	streamJSONArray(w, defaultQueryLimit, dataGetter)
 }
 
 func (s *httpdServer) handleGetWebAdmins(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	limit := defaultQueryLimit
-	if _, ok := r.URL.Query()["qlimit"]; ok {
-		var err error
-		limit, err = strconv.Atoi(r.URL.Query().Get("qlimit"))
-		if err != nil {
-			limit = defaultQueryLimit
-		}
-	}
-	admins := make([]dataprovider.Admin, 0, limit)
-	for {
-		a, err := dataprovider.GetAdmins(limit, len(admins), dataprovider.OrderASC)
-		if err != nil {
-			s.renderInternalServerErrorPage(w, r, err)
-			return
-		}
-		admins = append(admins, a...)
-		if len(a) < limit {
-			break
-		}
-	}
-	data := adminsPage{
-		basePage: s.getBasePageData(pageAdminsTitle, webAdminsPath, r),
-		Admins:   admins,
-	}
+
+	data := s.getBasePageData(util.I18nAdminsTitle, webAdminsPath, r)
 	renderAdminTemplate(w, templateAdmins, data)
 }
 
@@ -2821,7 +2946,7 @@ func (s *httpdServer) handleWebAdminSetupGet(w http.ResponseWriter, r *http.Requ
 		http.Redirect(w, r, webAdminLoginPath, http.StatusFound)
 		return
 	}
-	s.renderAdminSetupPage(w, r, "", "")
+	s.renderAdminSetupPage(w, r, "", util.GetIPFromRemoteAddress(r.RemoteAddr), nil)
 }
 
 func (s *httpdServer) handleWebAddAdminGet(w http.ResponseWriter, r *http.Request) {
@@ -2830,7 +2955,7 @@ func (s *httpdServer) handleWebAddAdminGet(w http.ResponseWriter, r *http.Reques
 		Status:      1,
 		Permissions: []string{dataprovider.PermAdminAny},
 	}
-	s.renderAddUpdateAdminPage(w, r, admin, "", true)
+	s.renderAddUpdateAdminPage(w, r, admin, nil, true)
 }
 
 func (s *httpdServer) handleWebUpdateAdminGet(w http.ResponseWriter, r *http.Request) {
@@ -2838,7 +2963,7 @@ func (s *httpdServer) handleWebUpdateAdminGet(w http.ResponseWriter, r *http.Req
 	username := getURLParam(r, "username")
 	admin, err := dataprovider.AdminExists(username)
 	if err == nil {
-		s.renderAddUpdateAdminPage(w, r, &admin, "", false)
+		s.renderAddUpdateAdminPage(w, r, &admin, nil, false)
 	} else if errors.Is(err, util.ErrNotFound) {
 		s.renderNotFoundPage(w, r, err)
 	} else {
@@ -2850,12 +2975,12 @@ func (s *httpdServer) handleWebAddAdminPost(w http.ResponseWriter, r *http.Reque
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	admin, err := getAdminFromPostFields(r)
 	if err != nil {
-		s.renderAddUpdateAdminPage(w, r, &admin, err.Error(), true)
+		s.renderAddUpdateAdminPage(w, r, &admin, err, true)
 		return
 	}
 	if admin.Password == "" && s.binding.isWebAdminLoginFormDisabled() {
@@ -2863,12 +2988,12 @@ func (s *httpdServer) handleWebAddAdminPost(w http.ResponseWriter, r *http.Reque
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	err = dataprovider.AddAdmin(&admin, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderAddUpdateAdminPage(w, r, &admin, err.Error(), true)
+		s.renderAddUpdateAdminPage(w, r, &admin, err, true)
 		return
 	}
 	http.Redirect(w, r, webAdminsPath, http.StatusSeeOther)
@@ -2889,12 +3014,12 @@ func (s *httpdServer) handleWebUpdateAdminPost(w http.ResponseWriter, r *http.Re
 
 	updatedAdmin, err := getAdminFromPostFields(r)
 	if err != nil {
-		s.renderAddUpdateAdminPage(w, r, &updatedAdmin, err.Error(), false)
+		s.renderAddUpdateAdminPage(w, r, &updatedAdmin, err, false)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	updatedAdmin.ID = admin.ID
@@ -2906,26 +3031,38 @@ func (s *httpdServer) handleWebUpdateAdminPost(w http.ResponseWriter, r *http.Re
 	updatedAdmin.Filters.RecoveryCodes = admin.Filters.RecoveryCodes
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderAddUpdateAdminPage(w, r, &updatedAdmin, "Invalid token claims", false)
+		s.renderAddUpdateAdminPage(w, r, &updatedAdmin, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken), false)
 		return
 	}
 	if username == claims.Username {
 		if claims.isCriticalPermRemoved(updatedAdmin.Permissions) {
-			s.renderAddUpdateAdminPage(w, r, &updatedAdmin, "You cannot remove these permissions to yourself", false)
+			s.renderAddUpdateAdminPage(w, r, &updatedAdmin,
+				util.NewI18nError(errors.New("you cannot remove these permissions to yourself"),
+					util.I18nErrorAdminSelfPerms,
+				), false)
 			return
 		}
 		if updatedAdmin.Status == 0 {
-			s.renderAddUpdateAdminPage(w, r, &updatedAdmin, "You cannot disable yourself", false)
+			s.renderAddUpdateAdminPage(w, r, &updatedAdmin,
+				util.NewI18nError(errors.New("you cannot disable yourself"),
+					util.I18nErrorAdminSelfDisable,
+				), false)
 			return
 		}
 		if updatedAdmin.Role != claims.Role {
-			s.renderAddUpdateAdminPage(w, r, &updatedAdmin, "You cannot add/change your role", false)
+			s.renderAddUpdateAdminPage(w, r, &updatedAdmin,
+				util.NewI18nError(
+					errors.New("you cannot add/change your role"),
+					util.I18nErrorAdminSelfRole,
+				), false)
 			return
 		}
+		updatedAdmin.Filters.RequirePasswordChange = admin.Filters.RequirePasswordChange
+		updatedAdmin.Filters.RequireTwoFactor = admin.Filters.RequireTwoFactor
 	}
 	err = dataprovider.UpdateAdmin(&updatedAdmin, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderAddUpdateAdminPage(w, r, &updatedAdmin, err.Error(), false)
+		s.renderAddUpdateAdminPage(w, r, &updatedAdmin, err, false)
 		return
 	}
 	http.Redirect(w, r, webAdminsPath, http.StatusSeeOther)
@@ -2934,46 +3071,41 @@ func (s *httpdServer) handleWebUpdateAdminPost(w http.ResponseWriter, r *http.Re
 func (s *httpdServer) handleWebDefenderPage(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	data := defenderHostsPage{
-		basePage:         s.getBasePageData(pageDefenderTitle, webDefenderPath, r),
+		basePage:         s.getBasePageData(util.I18nDefenderTitle, webDefenderPath, r),
 		DefenderHostsURL: webDefenderHostsPath,
 	}
 
 	renderAdminTemplate(w, templateDefender, data)
 }
 
+func getAllUsers(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	claims, err := getTokenClaims(r)
+	if err != nil || claims.Username == "" {
+		sendAPIResponse(w, r, nil, util.I18nErrorInvalidToken, http.StatusForbidden)
+		return
+	}
+
+	dataGetter := func(limit, offset int) ([]byte, int, error) {
+		results, err := dataprovider.GetUsers(limit, offset, dataprovider.OrderASC, claims.Role)
+		if err != nil {
+			return nil, 0, err
+		}
+		data, err := json.Marshal(results)
+		return data, len(results), err
+	}
+
+	streamJSONArray(w, defaultQueryLimit, dataGetter)
+}
+
 func (s *httpdServer) handleGetWebUsers(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
-	var limit int
-	if _, ok := r.URL.Query()["qlimit"]; ok {
-		var err error
-		limit, err = strconv.Atoi(r.URL.Query().Get("qlimit"))
-		if err != nil {
-			limit = defaultQueryLimit
-		}
-	} else {
-		limit = defaultQueryLimit
-	}
-	users := make([]dataprovider.User, 0, limit)
-	for {
-		u, err := dataprovider.GetUsers(limit, len(users), dataprovider.OrderASC, claims.Role)
-		if err != nil {
-			s.renderInternalServerErrorPage(w, r, err)
-			return
-		}
-		users = append(users, u...)
-		if len(u) < limit {
-			break
-		}
-	}
-	data := usersPage{
-		basePage: s.getBasePageData(pageUsersTitle, webUsersPath, r),
-		Users:    users,
-	}
+	data := s.getBasePageData(util.I18nUsersTitle, webUsersPath, r)
 	renderAdminTemplate(w, templateUsers, data)
 }
 
@@ -2984,7 +3116,7 @@ func (s *httpdServer) handleWebTemplateFolderGet(w http.ResponseWriter, r *http.
 		folder, err := dataprovider.GetFolderByName(name)
 		if err == nil {
 			folder.FsConfig.SetEmptySecrets()
-			s.renderFolderPage(w, r, folder, folderPageModeTemplate, "")
+			s.renderFolderPage(w, r, folder, folderPageModeTemplate, nil)
 		} else if errors.Is(err, util.ErrNotFound) {
 			s.renderNotFoundPage(w, r, err)
 		} else {
@@ -2992,7 +3124,7 @@ func (s *httpdServer) handleWebTemplateFolderGet(w http.ResponseWriter, r *http.
 		}
 	} else {
 		folder := vfs.BaseVirtualFolder{}
-		s.renderFolderPage(w, r, folder, folderPageModeTemplate, "")
+		s.renderFolderPage(w, r, folder, folderPageModeTemplate, nil)
 	}
 }
 
@@ -3000,20 +3132,20 @@ func (s *httpdServer) handleWebTemplateFolderPost(w http.ResponseWriter, r *http
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	templateFolder := vfs.BaseVirtualFolder{}
 	err = r.ParseMultipartForm(maxRequestSize)
 	if err != nil {
-		s.renderMessagePage(w, r, "Error parsing folders fields", "", http.StatusBadRequest, err, "")
+		s.renderMessagePage(w, r, util.I18nTemplateFolderTitle, http.StatusBadRequest, util.NewI18nError(err, util.I18nErrorInvalidForm), "")
 		return
 	}
 	defer r.MultipartForm.RemoveAll() //nolint:errcheck
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 
@@ -3021,7 +3153,7 @@ func (s *httpdServer) handleWebTemplateFolderPost(w http.ResponseWriter, r *http
 	templateFolder.Description = r.Form.Get("description")
 	fsConfig, err := getFsConfigFromPostFields(r)
 	if err != nil {
-		s.renderMessagePage(w, r, "Error parsing folders fields", "", http.StatusBadRequest, err, "")
+		s.renderMessagePage(w, r, util.I18nTemplateFolderTitle, http.StatusBadRequest, err, "")
 		return
 	}
 	templateFolder.FsConfig = fsConfig
@@ -3033,16 +3165,18 @@ func (s *httpdServer) handleWebTemplateFolderPost(w http.ResponseWriter, r *http
 	for _, tmpl := range foldersFields {
 		f := getFolderFromTemplate(templateFolder, tmpl)
 		if err := dataprovider.ValidateFolder(&f); err != nil {
-			s.renderMessagePage(w, r, "Folder validation error", fmt.Sprintf("Error validating folder %q", f.Name),
-				http.StatusBadRequest, err, "")
+			s.renderMessagePage(w, r, util.I18nTemplateFolderTitle, http.StatusBadRequest, err, "")
 			return
 		}
 		dump.Folders = append(dump.Folders, f)
 	}
 
 	if len(dump.Folders) == 0 {
-		s.renderMessagePage(w, r, "No folders defined", "No valid folders defined, unable to complete the requested action",
-			http.StatusBadRequest, nil, "")
+		s.renderMessagePage(w, r, util.I18nTemplateFolderTitle, http.StatusBadRequest,
+			util.NewI18nError(
+				errors.New("no valid folder defined, unable to complete the requested action"),
+				util.I18nErrorFolderTemplate,
+			), "")
 		return
 	}
 	if r.Form.Get("form_action") == "export_from_template" {
@@ -3052,8 +3186,7 @@ func (s *httpdServer) handleWebTemplateFolderPost(w http.ResponseWriter, r *http
 		return
 	}
 	if err = RestoreFolders(dump.Folders, "", 1, 0, claims.Username, ipAddr, claims.Role); err != nil {
-		s.renderMessagePage(w, r, "Unable to save folders", "Cannot save the defined folders:",
-			getRespStatus(err), err, "")
+		s.renderMessagePage(w, r, util.I18nTemplateFolderTitle, getRespStatus(err), err, "")
 		return
 	}
 	http.Redirect(w, r, webFoldersPath, http.StatusSeeOther)
@@ -3078,7 +3211,7 @@ func (s *httpdServer) handleWebTemplateUserGet(w http.ResponseWriter, r *http.Re
 			if user.ExpirationDate == 0 && admin.Filters.Preferences.DefaultUsersExpiration > 0 {
 				user.ExpirationDate = util.GetTimeAsMsSinceEpoch(time.Now().Add(24 * time.Hour * time.Duration(admin.Filters.Preferences.DefaultUsersExpiration)))
 			}
-			s.renderUserPage(w, r, &user, userPageModeTemplate, "", &admin)
+			s.renderUserPage(w, r, &user, userPageModeTemplate, nil, &admin)
 		} else if errors.Is(err, util.ErrNotFound) {
 			s.renderNotFoundPage(w, r, err)
 		} else {
@@ -3094,7 +3227,7 @@ func (s *httpdServer) handleWebTemplateUserGet(w http.ResponseWriter, r *http.Re
 		if admin.Filters.Preferences.DefaultUsersExpiration > 0 {
 			user.ExpirationDate = util.GetTimeAsMsSinceEpoch(time.Now().Add(24 * time.Hour * time.Duration(admin.Filters.Preferences.DefaultUsersExpiration)))
 		}
-		s.renderUserPage(w, r, &user, userPageModeTemplate, "", &admin)
+		s.renderUserPage(w, r, &user, userPageModeTemplate, nil, &admin)
 	}
 }
 
@@ -3102,17 +3235,17 @@ func (s *httpdServer) handleWebTemplateUserPost(w http.ResponseWriter, r *http.R
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	templateUser, err := getUserFromPostFields(r)
 	if err != nil {
-		s.renderMessagePage(w, r, "Error parsing user fields", "", http.StatusBadRequest, err, "")
+		s.renderMessagePage(w, r, util.I18nTemplateUserTitle, http.StatusBadRequest, err, "")
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 
@@ -3123,8 +3256,7 @@ func (s *httpdServer) handleWebTemplateUserPost(w http.ResponseWriter, r *http.R
 	for _, tmpl := range userTmplFields {
 		u := getUserFromTemplate(templateUser, tmpl)
 		if err := dataprovider.ValidateUser(&u); err != nil {
-			s.renderMessagePage(w, r, "User validation error", fmt.Sprintf("Error validating user %q", u.Username),
-				http.StatusBadRequest, err, "")
+			s.renderMessagePage(w, r, util.I18nTemplateUserTitle, http.StatusBadRequest, err, "")
 			return
 		}
 		// to create a template the "manage_system" permission is required, so role admins cannot use
@@ -3138,8 +3270,11 @@ func (s *httpdServer) handleWebTemplateUserPost(w http.ResponseWriter, r *http.R
 	}
 
 	if len(dump.Users) == 0 {
-		s.renderMessagePage(w, r, "No users defined", "No valid users defined, unable to complete the requested action",
-			http.StatusBadRequest, nil, "")
+		s.renderMessagePage(w, r, util.I18nTemplateUserTitle,
+			http.StatusBadRequest, util.NewI18nError(
+				errors.New("no valid user defined, unable to complete the requested action"),
+				util.I18nErrorUserTemplate,
+			), "")
 		return
 	}
 	if r.Form.Get("form_action") == "export_from_template" {
@@ -3149,8 +3284,7 @@ func (s *httpdServer) handleWebTemplateUserPost(w http.ResponseWriter, r *http.R
 		return
 	}
 	if err = RestoreUsers(dump.Users, "", 1, 0, claims.Username, ipAddr, claims.Role); err != nil {
-		s.renderMessagePage(w, r, "Unable to save users", "Cannot save the defined users:",
-			getRespStatus(err), err, "")
+		s.renderMessagePage(w, r, util.I18nTemplateUserTitle, getRespStatus(err), err, "")
 		return
 	}
 	http.Redirect(w, r, webUsersPath, http.StatusSeeOther)
@@ -3173,20 +3307,20 @@ func (s *httpdServer) handleWebAddUserGet(w http.ResponseWriter, r *http.Request
 	if admin.Filters.Preferences.DefaultUsersExpiration > 0 {
 		user.ExpirationDate = util.GetTimeAsMsSinceEpoch(time.Now().Add(24 * time.Hour * time.Duration(admin.Filters.Preferences.DefaultUsersExpiration)))
 	}
-	s.renderUserPage(w, r, &user, userPageModeAdd, "", &admin)
+	s.renderUserPage(w, r, &user, userPageModeAdd, nil, &admin)
 }
 
 func (s *httpdServer) handleWebUpdateUserGet(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	username := getURLParam(r, "username")
 	user, err := dataprovider.UserExists(username, claims.Role)
 	if err == nil {
-		s.renderUserPage(w, r, &user, userPageModeUpdate, "", nil)
+		s.renderUserPage(w, r, &user, userPageModeUpdate, nil, nil)
 	} else if errors.Is(err, util.ErrNotFound) {
 		s.renderNotFoundPage(w, r, err)
 	} else {
@@ -3198,17 +3332,17 @@ func (s *httpdServer) handleWebAddUserPost(w http.ResponseWriter, r *http.Reques
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	user, err := getUserFromPostFields(r)
 	if err != nil {
-		s.renderUserPage(w, r, &user, userPageModeAdd, err.Error(), nil)
+		s.renderUserPage(w, r, &user, userPageModeAdd, err, nil)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	user = getUserFromTemplate(user, userTemplateFields{
@@ -3225,7 +3359,7 @@ func (s *httpdServer) handleWebAddUserPost(w http.ResponseWriter, r *http.Reques
 	}
 	err = dataprovider.AddUser(&user, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderUserPage(w, r, &user, userPageModeAdd, err.Error(), nil)
+		s.renderUserPage(w, r, &user, userPageModeAdd, err, nil)
 		return
 	}
 	http.Redirect(w, r, webUsersPath, http.StatusSeeOther)
@@ -3235,7 +3369,7 @@ func (s *httpdServer) handleWebUpdateUserPost(w http.ResponseWriter, r *http.Req
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	username := getURLParam(r, "username")
@@ -3249,12 +3383,12 @@ func (s *httpdServer) handleWebUpdateUserPost(w http.ResponseWriter, r *http.Req
 	}
 	updatedUser, err := getUserFromPostFields(r)
 	if err != nil {
-		s.renderUserPage(w, r, &user, userPageModeUpdate, err.Error(), nil)
+		s.renderUserPage(w, r, &user, userPageModeUpdate, err, nil)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	updatedUser.ID = user.ID
@@ -3266,10 +3400,7 @@ func (s *httpdServer) handleWebUpdateUserPost(w http.ResponseWriter, r *http.Req
 	if updatedUser.Password == redactedSecret {
 		updatedUser.Password = user.Password
 	}
-	updateEncryptedSecrets(&updatedUser.FsConfig, user.FsConfig.S3Config.AccessSecret, user.FsConfig.AzBlobConfig.AccountKey,
-		user.FsConfig.AzBlobConfig.SASURL, user.FsConfig.GCSConfig.Credentials, user.FsConfig.CryptConfig.Passphrase,
-		user.FsConfig.SFTPConfig.Password, user.FsConfig.SFTPConfig.PrivateKey, user.FsConfig.SFTPConfig.KeyPassphrase,
-		user.FsConfig.HTTPConfig.Password, user.FsConfig.HTTPConfig.APIKey)
+	updateEncryptedSecrets(&updatedUser.FsConfig, &user.FsConfig)
 
 	updatedUser = getUserFromTemplate(updatedUser, userTemplateFields{
 		Username:   updatedUser.Username,
@@ -3282,7 +3413,7 @@ func (s *httpdServer) handleWebUpdateUserPost(w http.ResponseWriter, r *http.Req
 
 	err = dataprovider.UpdateUser(&updatedUser, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderUserPage(w, r, &updatedUser, userPageModeUpdate, err.Error(), nil)
+		s.renderUserPage(w, r, &updatedUser, userPageModeUpdate, err, nil)
 		return
 	}
 	if r.Form.Get("disconnect") != "" {
@@ -3294,7 +3425,7 @@ func (s *httpdServer) handleWebUpdateUserPost(w http.ResponseWriter, r *http.Req
 func (s *httpdServer) handleWebGetStatus(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	data := statusPage{
-		basePage: s.getBasePageData(pageStatusTitle, webStatusPath, r),
+		basePage: s.getBasePageData(util.I18nStatusTitle, webStatusPath, r),
 		Status:   getServicesStatus(),
 	}
 	renderAdminTemplate(w, templateStatus, data)
@@ -3304,41 +3435,37 @@ func (s *httpdServer) handleWebGetConnections(w http.ResponseWriter, r *http.Req
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
-	connectionStats := common.Connections.GetStats(claims.Role)
-	connectionStats = append(connectionStats, getNodesConnections(claims.Username, claims.Role)...)
-	data := connectionsPage{
-		basePage:    s.getBasePageData(pageConnectionsTitle, webConnectionsPath, r),
-		Connections: connectionStats,
-	}
+
+	data := s.getBasePageData(util.I18nSessionsTitle, webConnectionsPath, r)
 	renderAdminTemplate(w, templateConnections, data)
 }
 
 func (s *httpdServer) handleWebAddFolderGet(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	s.renderFolderPage(w, r, vfs.BaseVirtualFolder{}, folderPageModeAdd, "")
+	s.renderFolderPage(w, r, vfs.BaseVirtualFolder{}, folderPageModeAdd, nil)
 }
 
 func (s *httpdServer) handleWebAddFolderPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	folder := vfs.BaseVirtualFolder{}
 	err = r.ParseMultipartForm(maxRequestSize)
 	if err != nil {
-		s.renderFolderPage(w, r, folder, folderPageModeAdd, err.Error())
+		s.renderFolderPage(w, r, folder, folderPageModeAdd, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
 	defer r.MultipartForm.RemoveAll() //nolint:errcheck
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	folder.MappedPath = strings.TrimSpace(r.Form.Get("mapped_path"))
@@ -3346,7 +3473,7 @@ func (s *httpdServer) handleWebAddFolderPost(w http.ResponseWriter, r *http.Requ
 	folder.Description = r.Form.Get("description")
 	fsConfig, err := getFsConfigFromPostFields(r)
 	if err != nil {
-		s.renderFolderPage(w, r, folder, folderPageModeAdd, err.Error())
+		s.renderFolderPage(w, r, folder, folderPageModeAdd, err)
 		return
 	}
 	folder.FsConfig = fsConfig
@@ -3356,7 +3483,7 @@ func (s *httpdServer) handleWebAddFolderPost(w http.ResponseWriter, r *http.Requ
 	if err == nil {
 		http.Redirect(w, r, webFoldersPath, http.StatusSeeOther)
 	} else {
-		s.renderFolderPage(w, r, folder, folderPageModeAdd, err.Error())
+		s.renderFolderPage(w, r, folder, folderPageModeAdd, err)
 	}
 }
 
@@ -3365,7 +3492,7 @@ func (s *httpdServer) handleWebUpdateFolderGet(w http.ResponseWriter, r *http.Re
 	name := getURLParam(r, "name")
 	folder, err := dataprovider.GetFolderByName(name)
 	if err == nil {
-		s.renderFolderPage(w, r, folder, folderPageModeUpdate, "")
+		s.renderFolderPage(w, r, folder, folderPageModeUpdate, nil)
 	} else if errors.Is(err, util.ErrNotFound) {
 		s.renderNotFoundPage(w, r, err)
 	} else {
@@ -3377,7 +3504,7 @@ func (s *httpdServer) handleWebUpdateFolderPost(w http.ResponseWriter, r *http.R
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	name := getURLParam(r, "name")
@@ -3392,19 +3519,19 @@ func (s *httpdServer) handleWebUpdateFolderPost(w http.ResponseWriter, r *http.R
 
 	err = r.ParseMultipartForm(maxRequestSize)
 	if err != nil {
-		s.renderFolderPage(w, r, folder, folderPageModeUpdate, err.Error())
+		s.renderFolderPage(w, r, folder, folderPageModeUpdate, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
 	defer r.MultipartForm.RemoveAll() //nolint:errcheck
 
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	fsConfig, err := getFsConfigFromPostFields(r)
 	if err != nil {
-		s.renderFolderPage(w, r, folder, folderPageModeUpdate, err.Error())
+		s.renderFolderPage(w, r, folder, folderPageModeUpdate, err)
 		return
 	}
 	updatedFolder := vfs.BaseVirtualFolder{
@@ -3415,23 +3542,20 @@ func (s *httpdServer) handleWebUpdateFolderPost(w http.ResponseWriter, r *http.R
 	updatedFolder.Name = folder.Name
 	updatedFolder.FsConfig = fsConfig
 	updatedFolder.FsConfig.SetEmptySecretsIfNil()
-	updateEncryptedSecrets(&updatedFolder.FsConfig, folder.FsConfig.S3Config.AccessSecret, folder.FsConfig.AzBlobConfig.AccountKey,
-		folder.FsConfig.AzBlobConfig.SASURL, folder.FsConfig.GCSConfig.Credentials, folder.FsConfig.CryptConfig.Passphrase,
-		folder.FsConfig.SFTPConfig.Password, folder.FsConfig.SFTPConfig.PrivateKey, folder.FsConfig.SFTPConfig.KeyPassphrase,
-		folder.FsConfig.HTTPConfig.Password, folder.FsConfig.HTTPConfig.APIKey)
+	updateEncryptedSecrets(&updatedFolder.FsConfig, &folder.FsConfig)
 
 	updatedFolder = getFolderFromTemplate(updatedFolder, updatedFolder.Name)
 
 	err = dataprovider.UpdateFolder(&updatedFolder, folder.Users, folder.Groups, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderFolderPage(w, r, updatedFolder, folderPageModeUpdate, err.Error())
+		s.renderFolderPage(w, r, updatedFolder, folderPageModeUpdate, err)
 		return
 	}
 	http.Redirect(w, r, webFoldersPath, http.StatusSeeOther)
 }
 
 func (s *httpdServer) getWebVirtualFolders(w http.ResponseWriter, r *http.Request, limit int, minimal bool) ([]vfs.BaseVirtualFolder, error) {
-	folders := make([]vfs.BaseVirtualFolder, 0, limit)
+	folders := make([]vfs.BaseVirtualFolder, 0, 50)
 	for {
 		f, err := dataprovider.GetFolders(limit, len(folders), dataprovider.OrderASC, minimal)
 		if err != nil {
@@ -3446,30 +3570,30 @@ func (s *httpdServer) getWebVirtualFolders(w http.ResponseWriter, r *http.Reques
 	return folders, nil
 }
 
-func (s *httpdServer) handleWebGetFolders(w http.ResponseWriter, r *http.Request) {
+func getAllFolders(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	limit := defaultQueryLimit
-	if _, ok := r.URL.Query()["qlimit"]; ok {
-		var err error
-		limit, err = strconv.Atoi(r.URL.Query().Get("qlimit"))
+
+	dataGetter := func(limit, offset int) ([]byte, int, error) {
+		results, err := dataprovider.GetFolders(limit, offset, dataprovider.OrderASC, false)
 		if err != nil {
-			limit = defaultQueryLimit
+			return nil, 0, err
 		}
-	}
-	folders, err := s.getWebVirtualFolders(w, r, limit, false)
-	if err != nil {
-		return
+		data, err := json.Marshal(results)
+		return data, len(results), err
 	}
 
-	data := foldersPage{
-		basePage: s.getBasePageData(pageFoldersTitle, webFoldersPath, r),
-		Folders:  folders,
-	}
+	streamJSONArray(w, defaultQueryLimit, dataGetter)
+}
+
+func (s *httpdServer) handleWebGetFolders(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+
+	data := s.getBasePageData(util.I18nFoldersTitle, webFoldersPath, r)
 	renderAdminTemplate(w, templateFolders, data)
 }
 
 func (s *httpdServer) getWebGroups(w http.ResponseWriter, r *http.Request, limit int, minimal bool) ([]dataprovider.Group, error) {
-	groups := make([]dataprovider.Group, 0, limit)
+	groups := make([]dataprovider.Group, 0, 50)
 	for {
 		f, err := dataprovider.GetGroups(limit, len(groups), dataprovider.OrderASC, minimal)
 		if err != nil {
@@ -3484,53 +3608,53 @@ func (s *httpdServer) getWebGroups(w http.ResponseWriter, r *http.Request, limit
 	return groups, nil
 }
 
-func (s *httpdServer) handleWebGetGroups(w http.ResponseWriter, r *http.Request) {
+func getAllGroups(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	limit := defaultQueryLimit
-	if _, ok := r.URL.Query()["qlimit"]; ok {
-		var err error
-		limit, err = strconv.Atoi(r.URL.Query().Get("qlimit"))
+
+	dataGetter := func(limit, offset int) ([]byte, int, error) {
+		results, err := dataprovider.GetGroups(limit, offset, dataprovider.OrderASC, false)
 		if err != nil {
-			limit = defaultQueryLimit
+			return nil, 0, err
 		}
-	}
-	groups, err := s.getWebGroups(w, r, limit, false)
-	if err != nil {
-		return
+		data, err := json.Marshal(results)
+		return data, len(results), err
 	}
 
-	data := groupsPage{
-		basePage: s.getBasePageData(pageGroupsTitle, webGroupsPath, r),
-		Groups:   groups,
-	}
+	streamJSONArray(w, defaultQueryLimit, dataGetter)
+}
+
+func (s *httpdServer) handleWebGetGroups(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+
+	data := s.getBasePageData(util.I18nGroupsTitle, webGroupsPath, r)
 	renderAdminTemplate(w, templateGroups, data)
 }
 
 func (s *httpdServer) handleWebAddGroupGet(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	s.renderGroupPage(w, r, dataprovider.Group{}, genericPageModeAdd, "")
+	s.renderGroupPage(w, r, dataprovider.Group{}, genericPageModeAdd, nil)
 }
 
 func (s *httpdServer) handleWebAddGroupPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	group, err := getGroupFromPostFields(r)
 	if err != nil {
-		s.renderGroupPage(w, r, group, genericPageModeAdd, err.Error())
+		s.renderGroupPage(w, r, group, genericPageModeAdd, err)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	err = dataprovider.AddGroup(&group, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderGroupPage(w, r, group, genericPageModeAdd, err.Error())
+		s.renderGroupPage(w, r, group, genericPageModeAdd, err)
 		return
 	}
 	http.Redirect(w, r, webGroupsPath, http.StatusSeeOther)
@@ -3541,7 +3665,7 @@ func (s *httpdServer) handleWebUpdateGroupGet(w http.ResponseWriter, r *http.Req
 	name := getURLParam(r, "name")
 	group, err := dataprovider.GroupExists(name)
 	if err == nil {
-		s.renderGroupPage(w, r, group, genericPageModeUpdate, "")
+		s.renderGroupPage(w, r, group, genericPageModeUpdate, nil)
 	} else if errors.Is(err, util.ErrNotFound) {
 		s.renderNotFoundPage(w, r, err)
 	} else {
@@ -3553,7 +3677,7 @@ func (s *httpdServer) handleWebUpdateGroupPost(w http.ResponseWriter, r *http.Re
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	name := getURLParam(r, "name")
@@ -3567,28 +3691,23 @@ func (s *httpdServer) handleWebUpdateGroupPost(w http.ResponseWriter, r *http.Re
 	}
 	updatedGroup, err := getGroupFromPostFields(r)
 	if err != nil {
-		s.renderGroupPage(w, r, group, genericPageModeUpdate, err.Error())
+		s.renderGroupPage(w, r, group, genericPageModeUpdate, err)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	updatedGroup.ID = group.ID
 	updatedGroup.Name = group.Name
 	updatedGroup.SetEmptySecretsIfNil()
 
-	updateEncryptedSecrets(&updatedGroup.UserSettings.FsConfig, group.UserSettings.FsConfig.S3Config.AccessSecret,
-		group.UserSettings.FsConfig.AzBlobConfig.AccountKey, group.UserSettings.FsConfig.AzBlobConfig.SASURL,
-		group.UserSettings.FsConfig.GCSConfig.Credentials, group.UserSettings.FsConfig.CryptConfig.Passphrase,
-		group.UserSettings.FsConfig.SFTPConfig.Password, group.UserSettings.FsConfig.SFTPConfig.PrivateKey,
-		group.UserSettings.FsConfig.SFTPConfig.KeyPassphrase, group.UserSettings.FsConfig.HTTPConfig.Password,
-		group.UserSettings.FsConfig.HTTPConfig.APIKey)
+	updateEncryptedSecrets(&updatedGroup.UserSettings.FsConfig, &group.UserSettings.FsConfig)
 
 	err = dataprovider.UpdateGroup(&updatedGroup, group.Users, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderGroupPage(w, r, updatedGroup, genericPageModeUpdate, err.Error())
+		s.renderGroupPage(w, r, updatedGroup, genericPageModeUpdate, err)
 		return
 	}
 	http.Redirect(w, r, webGroupsPath, http.StatusSeeOther)
@@ -3611,25 +3730,25 @@ func (s *httpdServer) getWebEventActions(w http.ResponseWriter, r *http.Request,
 	return actions, nil
 }
 
-func (s *httpdServer) handleWebGetEventActions(w http.ResponseWriter, r *http.Request) {
+func getAllActions(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	limit := defaultQueryLimit
-	if _, ok := r.URL.Query()["qlimit"]; ok {
-		var err error
-		limit, err = strconv.Atoi(r.URL.Query().Get("qlimit"))
+
+	dataGetter := func(limit, offset int) ([]byte, int, error) {
+		results, err := dataprovider.GetEventActions(limit, offset, dataprovider.OrderASC, false)
 		if err != nil {
-			limit = defaultQueryLimit
+			return nil, 0, err
 		}
-	}
-	actions, err := s.getWebEventActions(w, r, limit, false)
-	if err != nil {
-		return
+		data, err := json.Marshal(results)
+		return data, len(results), err
 	}
 
-	data := eventActionsPage{
-		basePage: s.getBasePageData(pageEventActionsTitle, webAdminEventActionsPath, r),
-		Actions:  actions,
-	}
+	streamJSONArray(w, defaultQueryLimit, dataGetter)
+}
+
+func (s *httpdServer) handleWebGetEventActions(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+
+	data := s.getBasePageData(util.I18nActionsTitle, webAdminEventActionsPath, r)
 	renderAdminTemplate(w, templateEventActions, data)
 }
 
@@ -3638,28 +3757,28 @@ func (s *httpdServer) handleWebAddEventActionGet(w http.ResponseWriter, r *http.
 	action := dataprovider.BaseEventAction{
 		Type: dataprovider.ActionTypeHTTP,
 	}
-	s.renderEventActionPage(w, r, action, genericPageModeAdd, "")
+	s.renderEventActionPage(w, r, action, genericPageModeAdd, nil)
 }
 
 func (s *httpdServer) handleWebAddEventActionPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	action, err := getEventActionFromPostFields(r)
 	if err != nil {
-		s.renderEventActionPage(w, r, action, genericPageModeAdd, err.Error())
+		s.renderEventActionPage(w, r, action, genericPageModeAdd, err)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	if err = dataprovider.AddEventAction(&action, claims.Username, ipAddr, claims.Role); err != nil {
-		s.renderEventActionPage(w, r, action, genericPageModeAdd, err.Error())
+		s.renderEventActionPage(w, r, action, genericPageModeAdd, err)
 		return
 	}
 	http.Redirect(w, r, webAdminEventActionsPath, http.StatusSeeOther)
@@ -3670,7 +3789,7 @@ func (s *httpdServer) handleWebUpdateEventActionGet(w http.ResponseWriter, r *ht
 	name := getURLParam(r, "name")
 	action, err := dataprovider.EventActionExists(name)
 	if err == nil {
-		s.renderEventActionPage(w, r, action, genericPageModeUpdate, "")
+		s.renderEventActionPage(w, r, action, genericPageModeUpdate, nil)
 	} else if errors.Is(err, util.ErrNotFound) {
 		s.renderNotFoundPage(w, r, err)
 	} else {
@@ -3682,7 +3801,7 @@ func (s *httpdServer) handleWebUpdateEventActionPost(w http.ResponseWriter, r *h
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	name := getURLParam(r, "name")
@@ -3696,12 +3815,12 @@ func (s *httpdServer) handleWebUpdateEventActionPost(w http.ResponseWriter, r *h
 	}
 	updatedAction, err := getEventActionFromPostFields(r)
 	if err != nil {
-		s.renderEventActionPage(w, r, updatedAction, genericPageModeUpdate, err.Error())
+		s.renderEventActionPage(w, r, updatedAction, genericPageModeUpdate, err)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	updatedAction.ID = action.ID
@@ -3715,37 +3834,31 @@ func (s *httpdServer) handleWebUpdateEventActionPost(w http.ResponseWriter, r *h
 	}
 	err = dataprovider.UpdateEventAction(&updatedAction, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderEventActionPage(w, r, updatedAction, genericPageModeUpdate, err.Error())
+		s.renderEventActionPage(w, r, updatedAction, genericPageModeUpdate, err)
 		return
 	}
 	http.Redirect(w, r, webAdminEventActionsPath, http.StatusSeeOther)
 }
 
-func (s *httpdServer) handleWebGetEventRules(w http.ResponseWriter, r *http.Request) {
+func getAllRules(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	limit := defaultQueryLimit
-	if _, ok := r.URL.Query()["qlimit"]; ok {
-		if lim, err := strconv.Atoi(r.URL.Query().Get("qlimit")); err == nil {
-			limit = lim
-		}
-	}
-	rules := make([]dataprovider.EventRule, 0, limit)
-	for {
-		res, err := dataprovider.GetEventRules(limit, len(rules), dataprovider.OrderASC)
+
+	dataGetter := func(limit, offset int) ([]byte, int, error) {
+		results, err := dataprovider.GetEventRules(limit, offset, dataprovider.OrderASC)
 		if err != nil {
-			s.renderInternalServerErrorPage(w, r, err)
-			return
+			return nil, 0, err
 		}
-		rules = append(rules, res...)
-		if len(res) < limit {
-			break
-		}
+		data, err := json.Marshal(results)
+		return data, len(results), err
 	}
 
-	data := eventRulesPage{
-		basePage: s.getBasePageData(pageEventRulesTitle, webAdminEventRulesPath, r),
-		Rules:    rules,
-	}
+	streamJSONArray(w, defaultQueryLimit, dataGetter)
+}
+
+func (s *httpdServer) handleWebGetEventRules(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+
+	data := s.getBasePageData(util.I18nRulesTitle, webAdminEventRulesPath, r)
 	renderAdminTemplate(w, templateEventRules, data)
 }
 
@@ -3755,29 +3868,29 @@ func (s *httpdServer) handleWebAddEventRuleGet(w http.ResponseWriter, r *http.Re
 		Status:  1,
 		Trigger: dataprovider.EventTriggerFsEvent,
 	}
-	s.renderEventRulePage(w, r, rule, genericPageModeAdd, "")
+	s.renderEventRulePage(w, r, rule, genericPageModeAdd, nil)
 }
 
 func (s *httpdServer) handleWebAddEventRulePost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	rule, err := getEventRuleFromPostFields(r)
 	if err != nil {
-		s.renderEventRulePage(w, r, rule, genericPageModeAdd, err.Error())
+		s.renderEventRulePage(w, r, rule, genericPageModeAdd, err)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	err = verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr)
 	if err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	if err = dataprovider.AddEventRule(&rule, claims.Username, ipAddr, claims.Role); err != nil {
-		s.renderEventRulePage(w, r, rule, genericPageModeAdd, err.Error())
+		s.renderEventRulePage(w, r, rule, genericPageModeAdd, err)
 		return
 	}
 	http.Redirect(w, r, webAdminEventRulesPath, http.StatusSeeOther)
@@ -3788,7 +3901,7 @@ func (s *httpdServer) handleWebUpdateEventRuleGet(w http.ResponseWriter, r *http
 	name := getURLParam(r, "name")
 	rule, err := dataprovider.EventRuleExists(name)
 	if err == nil {
-		s.renderEventRulePage(w, r, rule, genericPageModeUpdate, "")
+		s.renderEventRulePage(w, r, rule, genericPageModeUpdate, nil)
 	} else if errors.Is(err, util.ErrNotFound) {
 		s.renderNotFoundPage(w, r, err)
 	} else {
@@ -3800,7 +3913,7 @@ func (s *httpdServer) handleWebUpdateEventRulePost(w http.ResponseWriter, r *htt
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	name := getURLParam(r, "name")
@@ -3814,26 +3927,26 @@ func (s *httpdServer) handleWebUpdateEventRulePost(w http.ResponseWriter, r *htt
 	}
 	updatedRule, err := getEventRuleFromPostFields(r)
 	if err != nil {
-		s.renderEventRulePage(w, r, updatedRule, genericPageModeUpdate, err.Error())
+		s.renderEventRulePage(w, r, updatedRule, genericPageModeUpdate, err)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	updatedRule.ID = rule.ID
 	updatedRule.Name = rule.Name
 	err = dataprovider.UpdateEventRule(&updatedRule, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderEventRulePage(w, r, updatedRule, genericPageModeUpdate, err.Error())
+		s.renderEventRulePage(w, r, updatedRule, genericPageModeUpdate, err)
 		return
 	}
 	http.Redirect(w, r, webAdminEventRulesPath, http.StatusSeeOther)
 }
 
 func (s *httpdServer) getWebRoles(w http.ResponseWriter, r *http.Request, limit int, minimal bool) ([]dataprovider.Role, error) {
-	roles := make([]dataprovider.Role, 0, limit)
+	roles := make([]dataprovider.Role, 0, 10)
 	for {
 		res, err := dataprovider.GetRoles(limit, len(roles), dataprovider.OrderASC, minimal)
 		if err != nil {
@@ -3848,44 +3961,53 @@ func (s *httpdServer) getWebRoles(w http.ResponseWriter, r *http.Request, limit 
 	return roles, nil
 }
 
+func getAllRoles(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+
+	dataGetter := func(limit, offset int) ([]byte, int, error) {
+		results, err := dataprovider.GetRoles(limit, offset, dataprovider.OrderASC, false)
+		if err != nil {
+			return nil, 0, err
+		}
+		data, err := json.Marshal(results)
+		return data, len(results), err
+	}
+
+	streamJSONArray(w, defaultQueryLimit, dataGetter)
+}
+
 func (s *httpdServer) handleWebGetRoles(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	roles, err := s.getWebRoles(w, r, 10, false)
-	if err != nil {
-		return
-	}
-	data := rolesPage{
-		basePage: s.getBasePageData(pageRolesTitle, webAdminRolesPath, r),
-		Roles:    roles,
-	}
+	data := s.getBasePageData(util.I18nRolesTitle, webAdminRolesPath, r)
+
 	renderAdminTemplate(w, templateRoles, data)
 }
 
 func (s *httpdServer) handleWebAddRoleGet(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
-	s.renderRolePage(w, r, dataprovider.Role{}, genericPageModeAdd, "")
+	s.renderRolePage(w, r, dataprovider.Role{}, genericPageModeAdd, nil)
 }
 
 func (s *httpdServer) handleWebAddRolePost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	role, err := getRoleFromPostFields(r)
 	if err != nil {
-		s.renderRolePage(w, r, role, genericPageModeAdd, err.Error())
+		s.renderRolePage(w, r, role, genericPageModeAdd, err)
 		return
 	}
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	err = dataprovider.AddRole(&role, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderRolePage(w, r, role, genericPageModeAdd, err.Error())
+		s.renderRolePage(w, r, role, genericPageModeAdd, err)
 		return
 	}
 	http.Redirect(w, r, webAdminRolesPath, http.StatusSeeOther)
@@ -3895,7 +4017,7 @@ func (s *httpdServer) handleWebUpdateRoleGet(w http.ResponseWriter, r *http.Requ
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	role, err := dataprovider.RoleExists(getURLParam(r, "name"))
 	if err == nil {
-		s.renderRolePage(w, r, role, genericPageModeUpdate, "")
+		s.renderRolePage(w, r, role, genericPageModeUpdate, nil)
 	} else if errors.Is(err, util.ErrNotFound) {
 		s.renderNotFoundPage(w, r, err)
 	} else {
@@ -3907,7 +4029,7 @@ func (s *httpdServer) handleWebUpdateRolePost(w http.ResponseWriter, r *http.Req
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	role, err := dataprovider.RoleExists(getURLParam(r, "name"))
@@ -3921,19 +4043,19 @@ func (s *httpdServer) handleWebUpdateRolePost(w http.ResponseWriter, r *http.Req
 
 	updatedRole, err := getRoleFromPostFields(r)
 	if err != nil {
-		s.renderRolePage(w, r, role, genericPageModeUpdate, err.Error())
+		s.renderRolePage(w, r, role, genericPageModeUpdate, err)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	updatedRole.ID = role.ID
 	updatedRole.Name = role.Name
 	err = dataprovider.UpdateRole(&updatedRole, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderRolePage(w, r, updatedRole, genericPageModeUpdate, err.Error())
+		s.renderRolePage(w, r, updatedRole, genericPageModeUpdate, err)
 		return
 	}
 	http.Redirect(w, r, webAdminRolesPath, http.StatusSeeOther)
@@ -3943,7 +4065,7 @@ func (s *httpdServer) handleWebGetEvents(w http.ResponseWriter, r *http.Request)
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 
 	data := eventsPage{
-		basePage:                s.getBasePageData(pageEventsTitle, webEventsPath, r),
+		basePage:                s.getBasePageData(util.I18nEventsTitle, webEventsPath, r),
 		FsEventsSearchURL:       webEventsFsSearchPath,
 		ProviderEventsSearchURL: webEventsProviderSearchPath,
 		LogEventsSearchURL:      webEventsLogSearchPath,
@@ -3955,7 +4077,7 @@ func (s *httpdServer) handleWebIPListsPage(w http.ResponseWriter, r *http.Reques
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	rtlStatus, rtlProtocols := common.Config.GetRateLimitersStatus()
 	data := ipListsPage{
-		basePage:              s.getBasePageData(pageIPListsTitle, webIPListsPath, r),
+		basePage:              s.getBasePageData(util.I18nIPListsTitle, webIPListsPath, r),
 		RateLimitersStatus:    rtlStatus,
 		RateLimitersProtocols: strings.Join(rtlProtocols, ", "),
 		IsAllowListEnabled:    common.Config.IsAllowListEnabled(),
@@ -3971,7 +4093,7 @@ func (s *httpdServer) handleWebAddIPListEntryGet(w http.ResponseWriter, r *http.
 		s.renderBadRequestPage(w, r, err)
 		return
 	}
-	s.renderIPListPage(w, r, dataprovider.IPListEntry{Type: listType}, genericPageModeAdd, "")
+	s.renderIPListPage(w, r, dataprovider.IPListEntry{Type: listType}, genericPageModeAdd, nil)
 }
 
 func (s *httpdServer) handleWebAddIPListEntryPost(w http.ResponseWriter, r *http.Request) {
@@ -3983,23 +4105,23 @@ func (s *httpdServer) handleWebAddIPListEntryPost(w http.ResponseWriter, r *http
 	}
 	entry, err := getIPListEntryFromPostFields(r, listType)
 	if err != nil {
-		s.renderIPListPage(w, r, entry, genericPageModeAdd, err.Error())
+		s.renderIPListPage(w, r, entry, genericPageModeAdd, err)
 		return
 	}
 	entry.Type = listType
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	err = dataprovider.AddIPListEntry(&entry, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderIPListPage(w, r, entry, genericPageModeAdd, err.Error())
+		s.renderIPListPage(w, r, entry, genericPageModeAdd, err)
 		return
 	}
 	http.Redirect(w, r, webIPListsPath, http.StatusSeeOther)
@@ -4014,7 +4136,7 @@ func (s *httpdServer) handleWebUpdateIPListEntryGet(w http.ResponseWriter, r *ht
 	}
 	entry, err := dataprovider.IPListEntryExists(ipOrNet, listType)
 	if err == nil {
-		s.renderIPListPage(w, r, entry, genericPageModeUpdate, "")
+		s.renderIPListPage(w, r, entry, genericPageModeUpdate, nil)
 	} else if errors.Is(err, util.ErrNotFound) {
 		s.renderNotFoundPage(w, r, err)
 	} else {
@@ -4026,7 +4148,7 @@ func (s *httpdServer) handleWebUpdateIPListEntryPost(w http.ResponseWriter, r *h
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	listType, ipOrNet, err := getIPListPathParams(r)
@@ -4044,19 +4166,19 @@ func (s *httpdServer) handleWebUpdateIPListEntryPost(w http.ResponseWriter, r *h
 	}
 	updatedEntry, err := getIPListEntryFromPostFields(r, listType)
 	if err != nil {
-		s.renderIPListPage(w, r, entry, genericPageModeUpdate, err.Error())
+		s.renderIPListPage(w, r, entry, genericPageModeUpdate, err)
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	updatedEntry.Type = listType
 	updatedEntry.IPOrNet = ipOrNet
 	err = dataprovider.UpdateIPListEntry(&updatedEntry, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderIPListPage(w, r, entry, genericPageModeUpdate, err.Error())
+		s.renderIPListPage(w, r, entry, genericPageModeUpdate, err)
 		return
 	}
 	http.Redirect(w, r, webIPListsPath, http.StatusSeeOther)
@@ -4069,14 +4191,14 @@ func (s *httpdServer) handleWebConfigs(w http.ResponseWriter, r *http.Request) {
 		s.renderInternalServerErrorPage(w, r, err)
 		return
 	}
-	s.renderConfigsPage(w, r, configs, "", 0)
+	s.renderConfigsPage(w, r, configs, nil, 0)
 }
 
 func (s *httpdServer) handleWebConfigsPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	claims, err := getTokenClaims(r)
 	if err != nil || claims.Username == "" {
-		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		s.renderForbiddenPage(w, r, util.NewI18nError(errInvalidTokenClaims, util.I18nErrorInvalidToken))
 		return
 	}
 	configs, err := dataprovider.GetConfigs()
@@ -4086,12 +4208,12 @@ func (s *httpdServer) handleWebConfigsPost(w http.ResponseWriter, r *http.Reques
 	}
 	err = r.ParseForm()
 	if err != nil {
-		s.renderBadRequestPage(w, r, err)
+		s.renderBadRequestPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidForm))
 		return
 	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
-		s.renderForbiddenPage(w, r, err.Error())
+		s.renderForbiddenPage(w, r, util.NewI18nError(err, util.I18nErrorInvalidCSRF))
 		return
 	}
 	var configSection int
@@ -4105,7 +4227,8 @@ func (s *httpdServer) handleWebConfigsPost(w http.ResponseWriter, r *http.Reques
 		acmeConfigs := getACMEConfigsFromPostFields(r)
 		configs.ACME = acmeConfigs
 		if err := acme.GetCertificatesForConfig(acmeConfigs, configurationDir); err != nil {
-			s.renderConfigsPage(w, r, configs, err.Error(), configSection)
+			logger.Info(logSender, "", "unable to get ACME certificates: %v", err)
+			s.renderConfigsPage(w, r, configs, util.NewI18nError(err, util.I18nErrorACMEGeneric), configSection)
 			return
 		}
 	case "smtp_submit":
@@ -4120,7 +4243,7 @@ func (s *httpdServer) handleWebConfigsPost(w http.ResponseWriter, r *http.Reques
 
 	err = dataprovider.UpdateConfigs(&configs, claims.Username, ipAddr, claims.Role)
 	if err != nil {
-		s.renderConfigsPage(w, r, configs, err.Error(), configSection)
+		s.renderConfigsPage(w, r, configs, err, configSection)
 		return
 	}
 	if configSection == 3 {
@@ -4131,30 +4254,29 @@ func (s *httpdServer) handleWebConfigsPost(w http.ResponseWriter, r *http.Reques
 			logger.Error(logSender, "", "unable to decrypt SMTP configuration, cannot activate configuration: %v", err)
 		}
 	}
-	s.renderMessagePage(w, r, "Configurations updated", "", http.StatusOK, nil,
-		"Configurations has been successfully updated")
+	s.renderMessagePage(w, r, util.I18nConfigsTitle, http.StatusOK, nil, util.I18nConfigsOK)
 }
 
 func (s *httpdServer) handleOAuth2TokenRedirect(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 
 	stateToken := r.URL.Query().Get("state")
-	errorTitle := "Unable to complete OAuth2 flow"
-	successTitle := "OAuth2 flow completed"
 
 	state, err := verifyOAuth2Token(stateToken, util.GetIPFromRemoteAddress(r.RemoteAddr))
 	if err != nil {
-		s.renderMessagePage(w, r, errorTitle, "Invalid auth request:", http.StatusBadRequest, err, "")
+		s.renderMessagePage(w, r, util.I18nOAuth2ErrorTitle, http.StatusBadRequest, err, "")
 		return
 	}
-
-	defer oauth2Mgr.removePendingAuth(state)
 
 	pendingAuth, err := oauth2Mgr.getPendingAuth(state)
 	if err != nil {
-		s.renderMessagePage(w, r, errorTitle, "Unable to validate auth request:", http.StatusInternalServerError, err, "")
+		oauth2Mgr.removePendingAuth(state)
+		s.renderMessagePage(w, r, util.I18nOAuth2ErrorTitle, http.StatusInternalServerError,
+			util.NewI18nError(err, util.I18nOAuth2ErrorValidateState), "")
 		return
 	}
+	oauth2Mgr.removePendingAuth(state)
+
 	oauth2Config := smtp.OAuth2Config{
 		Provider:     pendingAuth.Provider,
 		ClientID:     pendingAuth.ClientID,
@@ -4167,7 +4289,8 @@ func (s *httpdServer) handleOAuth2TokenRedirect(w http.ResponseWriter, r *http.R
 	cfg.RedirectURL = pendingAuth.RedirectURL
 	token, err := cfg.Exchange(ctx, r.URL.Query().Get("code"))
 	if err != nil {
-		s.renderMessagePage(w, r, errorTitle, "Unable to get token:", http.StatusInternalServerError, err, "")
+		s.renderMessagePage(w, r, util.I18nOAuth2ErrorTitle, http.StatusInternalServerError,
+			util.NewI18nError(err, util.I18nOAuth2ErrTokenExchange), "")
 		return
 	}
 	if token.RefreshToken == "" {
@@ -4175,11 +4298,12 @@ func (s *httpdServer) handleOAuth2TokenRedirect(w http.ResponseWriter, r *http.R
 			"Some providers only return the token when the user first authorizes. " +
 			"If you have already registered SFTPGo with this user in the past, revoke access and try again. " +
 			"This way you will invalidate the previous token"
-		s.renderMessagePage(w, r, errorTitle, "Unable to get token:", http.StatusBadRequest, errors.New(errTxt), "")
+		s.renderMessagePage(w, r, util.I18nOAuth2ErrorTitle, http.StatusBadRequest,
+			util.NewI18nError(errors.New(errTxt), util.I18nOAuth2ErrNoRefreshToken), "")
 		return
 	}
-	s.renderMessagePage(w, r, successTitle, "", http.StatusOK, nil,
-		fmt.Sprintf("Copy the following string, without the quotes, into SMTP OAuth2 Token configuration field: %q", token.RefreshToken))
+	s.renderMessagePageWithString(w, r, util.I18nOAuth2Title, http.StatusOK, nil, util.I18nOAuth2OK,
+		fmt.Sprintf("%q", token.RefreshToken))
 }
 
 func updateSMTPSecrets(newConfigs, currentConfigs *dataprovider.SMTPConfigs) {

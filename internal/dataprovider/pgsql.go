@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -29,9 +29,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/drakkan/sftpgo/v2/internal/logger"
+	"github.com/drakkan/sftpgo/v2/internal/util"
 	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/vfs"
 )
@@ -207,6 +209,16 @@ INSERT INTO {{schema_version}} (version) VALUES (28);
 `
 	// not supported in CockroachDB
 	ipListsLikeIndex = `CREATE INDEX "{{prefix}}ip_lists_ipornet_like_idx" ON "{{ip_lists}}" ("ipornet" varchar_pattern_ops);`
+	pgsqlV29SQL      = `ALTER TABLE "{{users}}" ALTER COLUMN "used_download_data_transfer" TYPE bigint;
+ALTER TABLE "{{users}}" ALTER COLUMN "used_upload_data_transfer" TYPE bigint;
+`
+	pgsqlV29DownSQL = `ALTER TABLE "{{users}}" ALTER COLUMN "used_upload_data_transfer" TYPE integer;
+ALTER TABLE "{{users}}" ALTER COLUMN "used_download_data_transfer" TYPE integer;
+`
+)
+
+var (
+	pgSQLTargetSessionAttrs = []string{"any", "read-write", "read-only", "primary", "standby", "prefer-standby"}
 )
 
 // PGSQLProvider defines the auth provider for PostgreSQL database
@@ -299,7 +311,7 @@ func getPGSQLConnectionString(redactedPwd bool) string {
 		if config.DisableSNI {
 			connectionString += " sslsni=0"
 		}
-		if config.TargetSessionAttrs != "" {
+		if util.Contains(pgSQLTargetSessionAttrs, config.TargetSessionAttrs) {
 			connectionString += fmt.Sprintf(" target_session_attrs='%s'", config.TargetSessionAttrs)
 		}
 	} else {
@@ -353,11 +365,11 @@ func (p *PGSQLProvider) userExists(username, role string) (User, error) {
 }
 
 func (p *PGSQLProvider) addUser(user *User) error {
-	return sqlCommonAddUser(user, p.dbHandle)
+	return p.normalizeError(sqlCommonAddUser(user, p.dbHandle), fieldUsername)
 }
 
 func (p *PGSQLProvider) updateUser(user *User) error {
-	return sqlCommonUpdateUser(user, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateUser(user, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) deleteUser(user User, softDelete bool) error {
@@ -399,7 +411,7 @@ func (p *PGSQLProvider) getFolderByName(name string) (vfs.BaseVirtualFolder, err
 }
 
 func (p *PGSQLProvider) addFolder(folder *vfs.BaseVirtualFolder) error {
-	return sqlCommonAddFolder(folder, p.dbHandle)
+	return p.normalizeError(sqlCommonAddFolder(folder, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateFolder(folder *vfs.BaseVirtualFolder) error {
@@ -435,7 +447,7 @@ func (p *PGSQLProvider) groupExists(name string) (Group, error) {
 }
 
 func (p *PGSQLProvider) addGroup(group *Group) error {
-	return sqlCommonAddGroup(group, p.dbHandle)
+	return p.normalizeError(sqlCommonAddGroup(group, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateGroup(group *Group) error {
@@ -455,11 +467,11 @@ func (p *PGSQLProvider) adminExists(username string) (Admin, error) {
 }
 
 func (p *PGSQLProvider) addAdmin(admin *Admin) error {
-	return sqlCommonAddAdmin(admin, p.dbHandle)
+	return p.normalizeError(sqlCommonAddAdmin(admin, p.dbHandle), fieldUsername)
 }
 
 func (p *PGSQLProvider) updateAdmin(admin *Admin) error {
-	return sqlCommonUpdateAdmin(admin, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateAdmin(admin, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) deleteAdmin(admin Admin) error {
@@ -483,11 +495,11 @@ func (p *PGSQLProvider) apiKeyExists(keyID string) (APIKey, error) {
 }
 
 func (p *PGSQLProvider) addAPIKey(apiKey *APIKey) error {
-	return sqlCommonAddAPIKey(apiKey, p.dbHandle)
+	return p.normalizeError(sqlCommonAddAPIKey(apiKey, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) updateAPIKey(apiKey *APIKey) error {
-	return sqlCommonUpdateAPIKey(apiKey, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateAPIKey(apiKey, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) deleteAPIKey(apiKey APIKey) error {
@@ -511,11 +523,11 @@ func (p *PGSQLProvider) shareExists(shareID, username string) (Share, error) {
 }
 
 func (p *PGSQLProvider) addShare(share *Share) error {
-	return sqlCommonAddShare(share, p.dbHandle)
+	return p.normalizeError(sqlCommonAddShare(share, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateShare(share *Share) error {
-	return sqlCommonUpdateShare(share, p.dbHandle)
+	return p.normalizeError(sqlCommonUpdateShare(share, p.dbHandle), -1)
 }
 
 func (p *PGSQLProvider) deleteShare(share Share) error {
@@ -615,7 +627,7 @@ func (p *PGSQLProvider) eventActionExists(name string) (BaseEventAction, error) 
 }
 
 func (p *PGSQLProvider) addEventAction(action *BaseEventAction) error {
-	return sqlCommonAddEventAction(action, p.dbHandle)
+	return p.normalizeError(sqlCommonAddEventAction(action, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateEventAction(action *BaseEventAction) error {
@@ -643,7 +655,7 @@ func (p *PGSQLProvider) eventRuleExists(name string) (EventRule, error) {
 }
 
 func (p *PGSQLProvider) addEventRule(rule *EventRule) error {
-	return sqlCommonAddEventRule(rule, p.dbHandle)
+	return p.normalizeError(sqlCommonAddEventRule(rule, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateEventRule(rule *EventRule) error {
@@ -695,7 +707,7 @@ func (p *PGSQLProvider) roleExists(name string) (Role, error) {
 }
 
 func (p *PGSQLProvider) addRole(role *Role) error {
-	return sqlCommonAddRole(role, p.dbHandle)
+	return p.normalizeError(sqlCommonAddRole(role, p.dbHandle), fieldName)
 }
 
 func (p *PGSQLProvider) updateRole(role *Role) error {
@@ -719,7 +731,7 @@ func (p *PGSQLProvider) ipListEntryExists(ipOrNet string, listType IPListType) (
 }
 
 func (p *PGSQLProvider) addIPListEntry(entry *IPListEntry) error {
-	return sqlCommonAddIPListEntry(entry, p.dbHandle)
+	return p.normalizeError(sqlCommonAddIPListEntry(entry, p.dbHandle), fieldIPNet)
 }
 
 func (p *PGSQLProvider) updateIPListEntry(entry *IPListEntry) error {
@@ -811,6 +823,8 @@ func (p *PGSQLProvider) migrateDatabase() error { //nolint:dupl
 		providerLog(logger.LevelError, "%v", err)
 		logger.ErrorToConsole("%v", err)
 		return err
+	case version == 28:
+		return updatePGSQLDatabaseFrom28To29(p.dbHandle)
 	default:
 		if version > sqlDatabaseVersion {
 			providerLog(logger.LevelError, "database schema version %d is newer than the supported one: %d", version,
@@ -833,6 +847,8 @@ func (p *PGSQLProvider) revertDatabase(targetVersion int) error {
 	}
 
 	switch dbVersion.Version {
+	case 29:
+		return downgradePGSQLDatabaseFrom29To28(p.dbHandle)
 	default:
 		return fmt.Errorf("database schema version not handled: %d", dbVersion.Version)
 	}
@@ -841,4 +857,48 @@ func (p *PGSQLProvider) revertDatabase(targetVersion int) error {
 func (p *PGSQLProvider) resetDatabase() error {
 	sql := sqlReplaceAll(pgsqlResetSQL)
 	return sqlCommonExecSQLAndUpdateDBVersion(p.dbHandle, []string{sql}, 0, false)
+}
+
+func (p *PGSQLProvider) normalizeError(err error, fieldType int) error {
+	if err == nil {
+		return nil
+	}
+	var pgsqlErr *pgconn.PgError
+	if errors.As(err, &pgsqlErr) {
+		switch pgsqlErr.Code {
+		case "23505":
+			var message string
+			switch fieldType {
+			case fieldUsername:
+				message = util.I18nErrorDuplicatedUsername
+			case fieldIPNet:
+				message = util.I18nErrorDuplicatedIPNet
+			default:
+				message = util.I18nErrorDuplicatedName
+			}
+			return util.NewI18nError(
+				fmt.Errorf("%w: %s", ErrDuplicatedKey, err.Error()),
+				message,
+			)
+		case "23503":
+			return fmt.Errorf("%w: %s", ErrForeignKeyViolated, err.Error())
+		}
+	}
+	return err
+}
+
+func updatePGSQLDatabaseFrom28To29(dbHandle *sql.DB) error {
+	logger.InfoToConsole("updating database schema version: 28 -> 29")
+	providerLog(logger.LevelInfo, "updating database schema version: 28 -> 29")
+
+	sql := strings.ReplaceAll(pgsqlV29SQL, "{{users}}", sqlTableUsers)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 29, true)
+}
+
+func downgradePGSQLDatabaseFrom29To28(dbHandle *sql.DB) error {
+	logger.InfoToConsole("downgrading database schema version: 29 -> 28")
+	providerLog(logger.LevelInfo, "downgrading database schema version: 29 -> 28")
+
+	sql := strings.ReplaceAll(pgsqlV29DownSQL, "{{users}}", sqlTableUsers)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, []string{sql}, 28, false)
 }

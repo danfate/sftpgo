@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -107,6 +107,7 @@ func ExecutePreAction(conn *BaseConnection, operation, filePath, virtualPath str
 			VirtualTargetPath: event.VirtualTargetPath,
 			FsTargetPath:      event.TargetPath,
 			ObjectName:        path.Base(event.VirtualPath),
+			Extension:         path.Ext(event.VirtualPath),
 			FileSize:          event.FileSize,
 			Protocol:          event.Protocol,
 			IP:                event.IP,
@@ -152,6 +153,7 @@ func ExecuteActionNotification(conn *BaseConnection, operation, filePath, virtua
 			VirtualTargetPath: notification.VirtualTargetPath,
 			FsTargetPath:      notification.TargetPath,
 			ObjectName:        path.Base(notification.VirtualPath),
+			Extension:         path.Ext(notification.VirtualPath),
 			FileSize:          notification.FileSize,
 			Elapsed:           notification.Elapsed,
 			Protocol:          notification.Protocol,
@@ -343,7 +345,7 @@ func notificationAsEnvVars(event *notifier.FsEvent) []string {
 	if len(event.Metadata) > 0 {
 		data, err := json.Marshal(event.Metadata)
 		if err == nil {
-			result = append(result, fmt.Sprintf("SFTPGO_ACTION_METADATA=%s", string(data)))
+			result = append(result, fmt.Sprintf("SFTPGO_ACTION_METADATA=%s", util.BytesToString(data)))
 		}
 	}
 	return result

@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	sqlDatabaseVersion     = 28
+	sqlDatabaseVersion     = 29
 	defaultSQLQueryTimeout = 10 * time.Second
 	longSQLQueryTimeout    = 60 * time.Second
 )
@@ -3247,6 +3247,9 @@ func sqlCommonGetSession(key string, dbHandle sqlQuerier) (Session, error) {
 	var data []byte // type hint, some driver will use string instead of []byte if the type is any
 	err := dbHandle.QueryRowContext(ctx, q, key).Scan(&session.Key, &data, &session.Type, &session.Timestamp)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return session, util.NewRecordNotFoundError(err.Error())
+		}
 		return session, err
 	}
 	session.Data = data

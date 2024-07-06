@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -32,7 +32,6 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/sftpd"
 	"github.com/drakkan/sftpgo/v2/internal/util"
-	"github.com/drakkan/sftpgo/v2/internal/version"
 	"github.com/drakkan/sftpgo/v2/internal/webdavd"
 )
 
@@ -65,21 +64,10 @@ func (s *Service) StartPortableMode(sftpdPort, ftpPort, webdavPort, httpPort int
 	telemetryConf.BindPort = 0
 	config.SetTelemetryConfig(telemetryConf)
 
-	if sftpdPort >= 0 {
-		configurePortableSFTPService(sftpdPort, enabledSSHCommands)
-	}
-
-	if ftpPort >= 0 {
-		configurePortableFTPService(ftpPort, ftpsCert, ftpsKey)
-	}
-
-	if webdavPort >= 0 {
-		configurePortableWebDAVService(webdavPort, webDavCert, webDavKey)
-	}
-
-	if httpPort >= 0 {
-		configurePortableHTTPService(httpPort, httpsCert, httpsKey)
-	}
+	configurePortableSFTPService(sftpdPort, enabledSSHCommands)
+	configurePortableFTPService(ftpPort, ftpsCert, ftpsKey)
+	configurePortableWebDAVService(webdavPort, webDavCert, webDavKey)
+	configurePortableHTTPService(httpPort, httpsCert, httpsKey)
 
 	err = s.Start(true)
 	if err != nil {
@@ -217,9 +205,11 @@ func configurePortableSFTPService(port int, enabledSSHCommands []string) {
 	}
 	if port > 0 {
 		sftpdConf.Bindings[0].Port = port
-	} else {
+	} else if port == 0 {
 		// dynamic ports starts from 49152
 		sftpdConf.Bindings[0].Port = 49152 + rand.Intn(15000)
+	} else {
+		sftpdConf.Bindings[0].Port = 0
 	}
 	if util.Contains(enabledSSHCommands, "*") {
 		sftpdConf.EnabledSSHCommands = sftpd.GetSupportedSSHCommands()
@@ -236,11 +226,10 @@ func configurePortableFTPService(port int, cert, key string) {
 	}
 	if port > 0 {
 		ftpConf.Bindings[0].Port = port
-	} else {
+	} else if port == 0 {
 		ftpConf.Bindings[0].Port = 49152 + rand.Intn(15000)
-	}
-	if ftpConf.Banner == "" {
-		ftpConf.Banner = fmt.Sprintf("SFTPGo portable %v ready", version.Get().Version)
+	} else {
+		ftpConf.Bindings[0].Port = 0
 	}
 	ftpConf.Bindings[0].CertificateFile = cert
 	ftpConf.Bindings[0].CertificateKeyFile = key
@@ -254,12 +243,16 @@ func configurePortableWebDAVService(port int, cert, key string) {
 	}
 	if port > 0 {
 		webDavConf.Bindings[0].Port = port
-	} else {
+	} else if port == 0 {
 		webDavConf.Bindings[0].Port = 49152 + rand.Intn(15000)
+	} else {
+		webDavConf.Bindings[0].Port = 0
 	}
 	webDavConf.Bindings[0].CertificateFile = cert
 	webDavConf.Bindings[0].CertificateKeyFile = key
-	webDavConf.Bindings[0].EnableHTTPS = true
+	if cert != "" && key != "" {
+		webDavConf.Bindings[0].EnableHTTPS = true
+	}
 	config.SetWebDAVDConfig(webDavConf)
 }
 
@@ -270,12 +263,16 @@ func configurePortableHTTPService(port int, cert, key string) {
 	}
 	if port > 0 {
 		httpdConf.Bindings[0].Port = port
-	} else {
+	} else if port == 0 {
 		httpdConf.Bindings[0].Port = 49152 + rand.Intn(15000)
+	} else {
+		httpdConf.Bindings[0].Port = 0
 	}
 	httpdConf.Bindings[0].CertificateFile = cert
 	httpdConf.Bindings[0].CertificateKeyFile = key
-	httpdConf.Bindings[0].EnableHTTPS = true
+	if cert != "" && key != "" {
+		httpdConf.Bindings[0].EnableHTTPS = true
+	}
 	httpdConf.Bindings[0].EnableWebAdmin = false
 	httpdConf.Bindings[0].EnableWebClient = true
 	httpdConf.Bindings[0].EnableRESTAPI = false

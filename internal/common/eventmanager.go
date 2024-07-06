@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -398,6 +398,7 @@ func (r *eventRulesContainer) handleFsEvent(params EventParams) (bool, error) {
 	r.RUnlock()
 
 	params.sender = params.Name
+	params.addUID()
 	if len(rulesAsync) > 0 {
 		go executeAsyncRulesActions(rulesAsync, params)
 	}
@@ -451,6 +452,7 @@ func (r *eventRulesContainer) handleIDPLoginEvent(params EventParams, customFiel
 		return nil, nil, fmt.Errorf("more than one account check action rules matches: %q", strings.Join(ruleNames, ","))
 	}
 
+	params.addUID()
 	if len(rulesAsync) > 0 {
 		go executeAsyncRulesActions(rulesAsync, params)
 	}
@@ -545,6 +547,7 @@ type EventParams struct {
 	VirtualTargetPath     string
 	FsTargetPath          string
 	ObjectName            string
+	Extension             string
 	ObjectType            string
 	FileSize              int64
 	Elapsed               int64
@@ -553,6 +556,7 @@ type EventParams struct {
 	Role                  string
 	Email                 string
 	Timestamp             int64
+	UID                   string
 	IDPCustomFields       *map[string]string
 	Object                plugin.Renderer
 	Metadata              map[string]string
@@ -619,6 +623,12 @@ func (p *EventParams) AddError(err error) {
 		p.Status = 2
 	}
 	p.errors = append(p.errors, err.Error())
+}
+
+func (p *EventParams) addUID() {
+	if p.UID == "" {
+		p.UID = util.GenerateUniqueID()
+	}
 }
 
 func (p *EventParams) setBackupParams(backupPath string) {
@@ -773,14 +783,16 @@ func (p *EventParams) getStringReplacements(addObjectData, jsonEscaped bool) []s
 		"{{FsTargetPath}}", p.getStringReplacement(p.FsTargetPath, jsonEscaped),
 		"{{ObjectName}}", p.getStringReplacement(p.ObjectName, jsonEscaped),
 		"{{ObjectType}}", p.ObjectType,
-		"{{FileSize}}", fmt.Sprintf("%d", p.FileSize),
-		"{{Elapsed}}", fmt.Sprintf("%d", p.Elapsed),
+		"{{FileSize}}", strconv.FormatInt(p.FileSize, 10),
+		"{{Elapsed}}", strconv.FormatInt(p.Elapsed, 10),
 		"{{Protocol}}", p.Protocol,
 		"{{IP}}", p.IP,
 		"{{Role}}", p.getStringReplacement(p.Role, jsonEscaped),
 		"{{Email}}", p.getStringReplacement(p.Email, jsonEscaped),
-		"{{Timestamp}}", fmt.Sprintf("%d", p.Timestamp),
+		"{{Timestamp}}", strconv.FormatInt(p.Timestamp, 10),
 		"{{StatusString}}", p.getStatusString(),
+		"{{UID}}", p.getStringReplacement(p.UID, jsonEscaped),
+		"{{Ext}}", p.getStringReplacement(p.Extension, jsonEscaped),
 	}
 	if p.VirtualPath != "" {
 		replacements = append(replacements, "{{VirtualDirPath}}", p.getStringReplacement(path.Dir(p.VirtualPath), jsonEscaped))
@@ -799,7 +811,7 @@ func (p *EventParams) getStringReplacements(addObjectData, jsonEscaped bool) []s
 	if addObjectData {
 		data, err := p.Object.RenderAsJSON(p.Event != operationDelete)
 		if err == nil {
-			dataString := string(data)
+			dataString := util.BytesToString(data)
 			replacements[len(replacements)-3] = p.getStringReplacement(dataString, false)
 			replacements[len(replacements)-1] = p.getStringReplacement(dataString, true)
 		}
@@ -814,7 +826,7 @@ func (p *EventParams) getStringReplacements(addObjectData, jsonEscaped bool) []s
 	if len(p.Metadata) > 0 {
 		data, err := json.Marshal(p.Metadata)
 		if err == nil {
-			dataString := string(data)
+			dataString := util.BytesToString(data)
 			replacements[len(replacements)-3] = p.getStringReplacement(dataString, false)
 			replacements[len(replacements)-1] = p.getStringReplacement(dataString, true)
 		}
@@ -955,7 +967,7 @@ func getFileWriter(conn *BaseConnection, virtualPath string, expectedSize int64)
 	if err := checkWriterPermsAndQuota(conn, virtualPath, numFiles, expectedSize, truncatedSize); err != nil {
 		return nil, numFiles, truncatedSize, nil, err
 	}
-	f, w, cancelFn, err := fs.Create(fsPath, 0, conn.GetCreateChecks(virtualPath, numFiles == 1))
+	f, w, cancelFn, err := fs.Create(fsPath, 0, conn.GetCreateChecks(virtualPath, numFiles == 1, false))
 	if err != nil {
 		return nil, numFiles, truncatedSize, nil, conn.GetFsError(fs, err)
 	}
@@ -976,11 +988,16 @@ func getFileWriter(conn *BaseConnection, virtualPath string, expectedSize int64)
 	return w, numFiles, truncatedSize, cancelFn, nil
 }
 
-func addZipEntry(wr *zipWriterWrapper, conn *BaseConnection, entryPath, baseDir string) error {
+func addZipEntry(wr *zipWriterWrapper, conn *BaseConnection, entryPath, baseDir string, recursion int) error {
 	if entryPath == wr.Name {
 		// skip the archive itself
 		return nil
 	}
+	if recursion >= util.MaxRecursion {
+		eventManagerLog(logger.LevelError, "unable to add zip entry %q, recursion too deep: %v", entryPath, recursion)
+		return util.ErrRecursionTooDeep
+	}
+	recursion++
 	info, err := conn.DoStat(entryPath, 1, false)
 	if err != nil {
 		eventManagerLog(logger.LevelError, "unable to add zip entry %q, stat error: %v", entryPath, err)
@@ -1006,25 +1023,42 @@ func addZipEntry(wr *zipWriterWrapper, conn *BaseConnection, entryPath, baseDir 
 			eventManagerLog(logger.LevelError, "unable to create zip entry %q: %v", entryPath, err)
 			return fmt.Errorf("unable to create zip entry %q: %w", entryPath, err)
 		}
-		contents, err := conn.ListDir(entryPath)
+		lister, err := conn.ListDir(entryPath)
 		if err != nil {
-			eventManagerLog(logger.LevelError, "unable to add zip entry %q, read dir error: %v", entryPath, err)
+			eventManagerLog(logger.LevelError, "unable to add zip entry %q, get dir lister error: %v", entryPath, err)
 			return fmt.Errorf("unable to add zip entry %q: %w", entryPath, err)
 		}
-		for _, info := range contents {
-			fullPath := util.CleanPath(path.Join(entryPath, info.Name()))
-			if err := addZipEntry(wr, conn, fullPath, baseDir); err != nil {
-				eventManagerLog(logger.LevelError, "unable to add zip entry: %v", err)
-				return err
+		defer lister.Close()
+
+		for {
+			contents, err := lister.Next(vfs.ListerBatchSize)
+			finished := errors.Is(err, io.EOF)
+			if err := lister.convertError(err); err != nil {
+				eventManagerLog(logger.LevelError, "unable to add zip entry %q, read dir error: %v", entryPath, err)
+				return fmt.Errorf("unable to add zip entry %q: %w", entryPath, err)
+			}
+			for _, info := range contents {
+				fullPath := util.CleanPath(path.Join(entryPath, info.Name()))
+				if err := addZipEntry(wr, conn, fullPath, baseDir, recursion); err != nil {
+					eventManagerLog(logger.LevelError, "unable to add zip entry: %v", err)
+					return err
+				}
+			}
+			if finished {
+				return nil
 			}
 		}
-		return nil
 	}
 	if !info.Mode().IsRegular() {
 		// we only allow regular files
 		eventManagerLog(logger.LevelInfo, "skipping zip entry for non regular file %q", entryPath)
 		return nil
 	}
+
+	return addFileToZip(wr, conn, entryPath, entryName, info.ModTime())
+}
+
+func addFileToZip(wr *zipWriterWrapper, conn *BaseConnection, entryPath, entryName string, modTime time.Time) error {
 	reader, cancelFn, err := getFileReader(conn, entryPath)
 	if err != nil {
 		eventManagerLog(logger.LevelError, "unable to add zip entry %q, cannot open file: %v", entryPath, err)
@@ -1036,7 +1070,7 @@ func addZipEntry(wr *zipWriterWrapper, conn *BaseConnection, entryPath, baseDir 
 	f, err := wr.Writer.CreateHeader(&zip.FileHeader{
 		Name:     entryName,
 		Method:   zip.Deflate,
-		Modified: info.ModTime(),
+		Modified: modTime,
 	})
 	if err != nil {
 		eventManagerLog(logger.LevelError, "unable to create zip entry %q: %v", entryPath, err)
@@ -1166,7 +1200,7 @@ func checkUserConditionOptions(user *dataprovider.User, conditions *dataprovider
 	return true
 }
 
-// checkConditionPatterns returns false if patterns are defined and no match is found
+// checkEventConditionPatterns returns false if patterns are defined and no match is found
 func checkEventConditionPatterns(name string, patterns []dataprovider.ConditionPattern) bool {
 	if len(patterns) == 0 {
 		return true
@@ -1252,9 +1286,9 @@ func writeHTTPPart(m *multipart.Writer, part dataprovider.HTTPPart, h textproto.
 		if strings.Contains(strings.ToLower(cType), "application/json") {
 			replacements := params.getStringReplacements(addObjectData, true)
 			jsonReplacer := strings.NewReplacer(replacements...)
-			_, err = partWriter.Write([]byte(replaceWithReplacer(part.Body, jsonReplacer)))
+			_, err = partWriter.Write(util.StringToBytes(replaceWithReplacer(part.Body, jsonReplacer)))
 		} else {
-			_, err = partWriter.Write([]byte(replaceWithReplacer(part.Body, replacer)))
+			_, err = partWriter.Write(util.StringToBytes(replaceWithReplacer(part.Body, replacer)))
 		}
 		if err != nil {
 			eventManagerLog(logger.LevelError, "unable to write part %q, err: %v", part.Name, err)
@@ -1432,7 +1466,8 @@ func executeHTTPRuleAction(c dataprovider.EventActionHTTPConfig, params *EventPa
 		endpoint, time.Since(startTime), resp.StatusCode)
 	if resp.StatusCode < http.StatusOK || resp.StatusCode > http.StatusNoContent {
 		if rb, err := io.ReadAll(io.LimitReader(resp.Body, 2048)); err == nil {
-			eventManagerLog(logger.LevelDebug, "error notification response from endpoint %q: %s", endpoint, string(rb))
+			eventManagerLog(logger.LevelDebug, "error notification response from endpoint %q: %s",
+				endpoint, util.BytesToString(rb))
 		}
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
@@ -1464,7 +1499,15 @@ func executeCommandRuleAction(c dataprovider.EventActionCommandConfig, params *E
 	cmd := exec.CommandContext(ctx, c.Cmd, args...)
 	cmd.Env = []string{}
 	for _, keyVal := range c.EnvVars {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", keyVal.Key, replaceWithReplacer(keyVal.Value, replacer)))
+		if keyVal.Value == "$" {
+			val := os.Getenv(keyVal.Key)
+			if val == "" {
+				eventManagerLog(logger.LevelDebug, "empty value for environment variable %q", keyVal.Key)
+			}
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", keyVal.Key, val))
+		} else {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", keyVal.Key, replaceWithReplacer(keyVal.Value, replacer)))
+		}
 	}
 
 	startTime := time.Now()
@@ -1870,18 +1913,28 @@ func getArchiveBaseDir(paths []string) string {
 func getSizeForPath(conn *BaseConnection, p string, info os.FileInfo) (int64, error) {
 	if info.IsDir() {
 		var dirSize int64
-		entries, err := conn.ListDir(p)
+		lister, err := conn.ListDir(p)
 		if err != nil {
 			return 0, err
 		}
-		for _, entry := range entries {
-			size, err := getSizeForPath(conn, path.Join(p, entry.Name()), entry)
-			if err != nil {
+		defer lister.Close()
+		for {
+			entries, err := lister.Next(vfs.ListerBatchSize)
+			finished := errors.Is(err, io.EOF)
+			if err != nil && !finished {
 				return 0, err
 			}
-			dirSize += size
+			for _, entry := range entries {
+				size, err := getSizeForPath(conn, path.Join(p, entry.Name()), entry)
+				if err != nil {
+					return 0, err
+				}
+				dirSize += size
+			}
+			if finished {
+				return dirSize, nil
+			}
 		}
-		return dirSize, nil
 	}
 	if info.Mode().IsRegular() {
 		return info.Size(), nil
@@ -1958,7 +2011,7 @@ func executeCompressFsActionForUser(c dataprovider.EventActionFsCompress, replac
 	}
 	startTime := time.Now()
 	for _, item := range paths {
-		if err := addZipEntry(zipWriter, conn, item, baseDir); err != nil {
+		if err := addZipEntry(zipWriter, conn, item, baseDir, 0); err != nil {
 			closeWriterAndUpdateQuota(writer, conn, name, "", numFiles, truncatedSize, err, operationUpload, startTime) //nolint:errcheck
 			return err
 		}
@@ -2302,54 +2355,62 @@ func executeUserExpirationCheckRuleAction(conditions dataprovider.ConditionOptio
 	return nil
 }
 
-func executeMetadataCheckForUser(user *dataprovider.User) error {
-	if err := user.LoadAndApplyGroupSettings(); err != nil {
-		eventManagerLog(logger.LevelError, "skipping scheduled quota reset for user %s, cannot apply group settings: %v",
-			user.Username, err)
-		return err
+func executeInactivityCheckForUser(user *dataprovider.User, config dataprovider.EventActionUserInactivity, when time.Time) error {
+	if config.DeleteThreshold > 0 && (user.Status == 0 || config.DisableThreshold == 0) {
+		if inactivityDays := user.InactivityDays(when); inactivityDays > config.DeleteThreshold {
+			err := dataprovider.DeleteUser(user.Username, dataprovider.ActionExecutorSystem, "", "")
+			eventManagerLog(logger.LevelInfo, "deleting inactive user %q, days of inactivity: %d/%d, err: %v",
+				user.Username, inactivityDays, config.DeleteThreshold, err)
+			if err != nil {
+				return fmt.Errorf("unable to delete inactive user %q", user.Username)
+			}
+			return fmt.Errorf("inactive user %q deleted. Number of days of inactivity: %d", user.Username, inactivityDays)
+		}
 	}
-	if !ActiveMetadataChecks.Add(user.Username, user.Role) {
-		eventManagerLog(logger.LevelError, "another metadata check is already in progress for user %q", user.Username)
-		return fmt.Errorf("another metadata check is in progress for user %q", user.Username)
+	if config.DisableThreshold > 0 && user.Status > 0 {
+		if inactivityDays := user.InactivityDays(when); inactivityDays > config.DisableThreshold {
+			user.Status = 0
+			err := dataprovider.UpdateUser(user, dataprovider.ActionExecutorSystem, "", "")
+			eventManagerLog(logger.LevelInfo, "disabling inactive user %q, days of inactivity: %d/%d, err: %v",
+				user.Username, inactivityDays, config.DisableThreshold, err)
+			if err != nil {
+				return fmt.Errorf("unable to disable inactive user %q", user.Username)
+			}
+			return fmt.Errorf("inactive user %q disabled. Number of days of inactivity: %d", user.Username, inactivityDays)
+		}
 	}
-	defer ActiveMetadataChecks.Remove(user.Username)
 
-	if err := user.CheckMetadataConsistency(); err != nil {
-		eventManagerLog(logger.LevelError, "error checking metadata consistence for user %q: %v", user.Username, err)
-		return fmt.Errorf("error checking metadata consistence for user %q: %w", user.Username, err)
-	}
 	return nil
 }
 
-func executeMetadataCheckRuleAction(conditions dataprovider.ConditionOptions, params *EventParams) error {
+func executeUserInactivityCheckRuleAction(config dataprovider.EventActionUserInactivity,
+	conditions dataprovider.ConditionOptions,
+	params *EventParams,
+	when time.Time,
+) error {
 	users, err := params.getUsers()
 	if err != nil {
 		return fmt.Errorf("unable to get users: %w", err)
 	}
 	var failures []string
-	var executed int
 	for _, user := range users {
 		// if sender is set, the conditions have already been evaluated
 		if params.sender == "" {
 			if !checkUserConditionOptions(&user, &conditions) {
-				eventManagerLog(logger.LevelDebug, "skipping metadata check for user %q, condition options don't match",
+				eventManagerLog(logger.LevelDebug, "skipping inactivity check for user %q, condition options don't match",
 					user.Username)
 				continue
 			}
 		}
-		executed++
-		if err = executeMetadataCheckForUser(&user); err != nil {
+		if err = executeInactivityCheckForUser(&user, config, when); err != nil {
 			params.AddError(err)
 			failures = append(failures, user.Username)
 		}
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("metadata check failed for users: %s", strings.Join(failures, ", "))
+		return fmt.Errorf("executed inactivity check actions for users: %s", strings.Join(failures, ", "))
 	}
-	if executed == 0 {
-		eventManagerLog(logger.LevelError, "no metadata check executed")
-		return errors.New("no metadata check executed")
-	}
+
 	return nil
 }
 
@@ -2440,7 +2501,7 @@ func executeAdminCheckAction(c *dataprovider.EventActionIDPAccountCheck, params 
 	data := replaceWithReplacer(c.TemplateAdmin, replacer)
 
 	var newAdmin dataprovider.Admin
-	err = json.Unmarshal([]byte(data), &newAdmin)
+	err = json.Unmarshal(util.StringToBytes(data), &newAdmin)
 	if err != nil {
 		return nil, err
 	}
@@ -2472,7 +2533,7 @@ func executeUserCheckAction(c *dataprovider.EventActionIDPAccountCheck, params *
 	data := replaceWithReplacer(c.TemplateUser, replacer)
 
 	var newUser dataprovider.User
-	err = json.Unmarshal([]byte(data), &newUser)
+	err = json.Unmarshal(util.StringToBytes(data), &newUser)
 	if err != nil {
 		return nil, err
 	}
@@ -2490,7 +2551,7 @@ func executeUserCheckAction(c *dataprovider.EventActionIDPAccountCheck, params *
 	return &u, err
 }
 
-func executeRuleAction(action dataprovider.BaseEventAction, params *EventParams,
+func executeRuleAction(action dataprovider.BaseEventAction, params *EventParams, //nolint:gocyclo
 	conditions dataprovider.ConditionOptions,
 ) error {
 	var err error
@@ -2516,14 +2577,16 @@ func executeRuleAction(action dataprovider.BaseEventAction, params *EventParams,
 		err = executeTransferQuotaResetRuleAction(conditions, params)
 	case dataprovider.ActionTypeDataRetentionCheck:
 		err = executeDataRetentionCheckRuleAction(action.Options.RetentionConfig, conditions, params, action.Name)
-	case dataprovider.ActionTypeMetadataCheck:
-		err = executeMetadataCheckRuleAction(conditions, params)
 	case dataprovider.ActionTypeFilesystem:
 		err = executeFsRuleAction(action.Options.FsConfig, conditions, params)
 	case dataprovider.ActionTypePasswordExpirationCheck:
 		err = executePwdExpirationCheckRuleAction(action.Options.PwdExpirationConfig, conditions, params)
 	case dataprovider.ActionTypeUserExpirationCheck:
 		err = executeUserExpirationCheckRuleAction(conditions, params)
+	case dataprovider.ActionTypeUserInactivityCheck:
+		err = executeUserInactivityCheckRuleAction(action.Options.UserInactivityConfig, conditions, params, time.Now())
+	case dataprovider.ActionTypeRotateLogs:
+		err = logger.RotateLogFile()
 	default:
 		err = fmt.Errorf("unsupported action type: %d", action.Type)
 	}
@@ -2607,6 +2670,7 @@ func executeAsyncRulesActions(rules []dataprovider.EventRule, params EventParams
 	eventManager.addAsyncTask()
 	defer eventManager.removeAsyncTask()
 
+	params.addUID()
 	for _, rule := range rules {
 		executeRuleAsyncActions(rule, params.getACopy(), nil)
 	}

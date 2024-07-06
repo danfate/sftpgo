@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -41,6 +41,7 @@ import (
 	"github.com/drakkan/sftpgo/v2/internal/metric"
 	"github.com/drakkan/sftpgo/v2/internal/plugin"
 	"github.com/drakkan/sftpgo/v2/internal/util"
+	"github.com/drakkan/sftpgo/v2/internal/version"
 )
 
 type webDavServer struct {
@@ -82,7 +83,7 @@ func (s *webDavServer) listenAndServe(compressor *middleware.Compressor) error {
 		httpServer.TLSConfig = &tls.Config{
 			GetCertificate: certMgr.GetCertificateFunc(certID),
 			MinVersion:     util.GetTLSVersion(s.binding.MinTLSVersion),
-			NextProtos:     []string{"http/1.1", "h2"},
+			NextProtos:     util.GetALPNProtocols(s.binding.Protocols),
 			CipherSuites:   util.GetTLSCiphersFromNames(s.binding.TLSCipherSuites),
 		}
 		logger.Debug(logSender, "", "configured TLS cipher suites for binding %q: %v, certID: %v",
@@ -165,6 +166,7 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	w.Header().Set("Server", version.GetServerVersion("/", false))
 	ipAddr := s.checkRemoteAddress(r)
 
 	common.Connections.AddClientConnection(ipAddr)
@@ -194,7 +196,7 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	user, isCached, lockSystem, loginMethod, err := s.authenticate(r, ipAddr)
 	if err != nil {
 		if !s.binding.DisableWWWAuthHeader {
-			w.Header().Set("WWW-Authenticate", "Basic realm=\"SFTPGo WebDAV\"")
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf("Basic realm=\"%s WebDAV\"", version.GetServerVersion("_", false)))
 		}
 		http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
 		return
@@ -293,7 +295,7 @@ func (s *webDavServer) authenticate(r *http.Request, ip string) (dataprovider.Us
 		if cachedUser.IsExpired() {
 			dataprovider.RemoveCachedWebDAVUser(username)
 		} else {
-			if !cachedUser.User.IsTLSUsernameVerificationEnabled() {
+			if !cachedUser.User.IsTLSVerificationEnabled() {
 				// for backward compatibility with 2.0.x we only check the password
 				tlsCert = nil
 				loginMethod = dataprovider.LoginMethodPassword
@@ -422,7 +424,10 @@ func writeLog(r *http.Request, status int, err error) {
 
 func updateLoginMetrics(user *dataprovider.User, ip, loginMethod string, err error) {
 	metric.AddLoginAttempt(loginMethod)
-	if err != nil && err != common.ErrInternalFailure && err != common.ErrNoCredentials {
+	if err == nil {
+		plugin.Handler.NotifyLogEvent(notifier.LogEventTypeLoginOK, common.ProtocolWebDAV, user.Username, ip, "", nil)
+		common.DelayLogin(nil)
+	} else if err != common.ErrInternalFailure && err != common.ErrNoCredentials {
 		logger.ConnectionFailedLog(user.Username, ip, loginMethod, common.ProtocolWebDAV, err.Error())
 		event := common.HostEventLoginFailed
 		logEv := notifier.LogEventTypeLoginFailed
@@ -432,6 +437,9 @@ func updateLoginMetrics(user *dataprovider.User, ip, loginMethod string, err err
 		}
 		common.AddDefenderEvent(ip, common.ProtocolWebDAV, event)
 		plugin.Handler.NotifyLogEvent(logEv, common.ProtocolWebDAV, user.Username, ip, "", err)
+		if loginMethod != dataprovider.LoginMethodTLSCertificate {
+			common.DelayLogin(err)
+		}
 	}
 	metric.AddLoginResult(loginMethod, err)
 	dataprovider.ExecutePostLoginHook(user, loginMethod, ip, common.ProtocolWebDAV, err)

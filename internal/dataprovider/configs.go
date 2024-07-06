@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -17,7 +17,6 @@ package dataprovider
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"golang.org/x/crypto/ssh"
 
@@ -28,35 +27,36 @@ import (
 
 // Supported values for host keys, KEXs, ciphers, MACs
 var (
-	supportedHostKeyAlgos = []string{ssh.KeyAlgoRSA}
-	supportedKexAlgos     = []string{
-		"diffie-hellman-group16-sha512", "diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1",
-		"diffie-hellman-group-exchange-sha256", "diffie-hellman-group-exchange-sha1",
+	supportedHostKeyAlgos   = []string{ssh.KeyAlgoRSA}
+	supportedPublicKeyAlgos = []string{ssh.KeyAlgoRSA, ssh.InsecureKeyAlgoDSA}
+	supportedKexAlgos       = []string{
+		ssh.KeyExchangeDH16SHA512, ssh.InsecureKeyExchangeDH14SHA1, ssh.InsecureKeyExchangeDH1SHA1,
+		ssh.InsecureKeyExchangeDHGEXSHA1,
 	}
 	supportedCiphers = []string{
-		"aes128-cbc", "aes192-cbc", "aes256-cbc",
-		"3des-cbc",
+		ssh.InsecureCipherAES128CBC, ssh.InsecureCipherAES192CBC, ssh.InsecureCipherAES256CBC,
+		ssh.InsecureCipherTripleDESCBC,
 	}
 	supportedMACs = []string{
-		"hmac-sha2-512-etm@openssh.com", "hmac-sha2-512",
-		"hmac-sha1", "hmac-sha1-96",
+		ssh.HMACSHA512ETM, ssh.HMACSHA512,
+		ssh.InsecureHMACSHA1, ssh.InsecureHMACSHA196,
 	}
 )
 
 // SFTPDConfigs defines configurations for SFTPD
 type SFTPDConfigs struct {
-	HostKeyAlgos  []string `json:"host_key_algos,omitempty"`
-	Moduli        []string `json:"moduli,omitempty"`
-	KexAlgorithms []string `json:"kex_algorithms,omitempty"`
-	Ciphers       []string `json:"ciphers,omitempty"`
-	MACs          []string `json:"macs,omitempty"`
+	HostKeyAlgos   []string `json:"host_key_algos,omitempty"`
+	PublicKeyAlgos []string `json:"public_key_algos,omitempty"`
+	KexAlgorithms  []string `json:"kex_algorithms,omitempty"`
+	Ciphers        []string `json:"ciphers,omitempty"`
+	MACs           []string `json:"macs,omitempty"`
 }
 
 func (c *SFTPDConfigs) isEmpty() bool {
 	if len(c.HostKeyAlgos) > 0 {
 		return false
 	}
-	if len(c.Moduli) > 0 {
+	if len(c.PublicKeyAlgos) > 0 {
 		return false
 	}
 	if len(c.KexAlgorithms) > 0 {
@@ -76,6 +76,11 @@ func (*SFTPDConfigs) GetSupportedHostKeyAlgos() []string {
 	return supportedHostKeyAlgos
 }
 
+// GetSupportedPublicKeyAlgos returns the supported legacy public key algos
+func (*SFTPDConfigs) GetSupportedPublicKeyAlgos() []string {
+	return supportedPublicKeyAlgos
+}
+
 // GetSupportedKEXAlgos returns the supported KEX algos
 func (*SFTPDConfigs) GetSupportedKEXAlgos() []string {
 	return supportedKexAlgos
@@ -89,11 +94,6 @@ func (*SFTPDConfigs) GetSupportedCiphers() []string {
 // GetSupportedMACs returns the supported MACs algos
 func (*SFTPDConfigs) GetSupportedMACs() []string {
 	return supportedMACs
-}
-
-// GetModuliAsString returns moduli files as comma separated string
-func (c *SFTPDConfigs) GetModuliAsString() string {
-	return strings.Join(c.Moduli, ",")
 }
 
 func (c *SFTPDConfigs) validate() error {
@@ -110,7 +110,7 @@ func (c *SFTPDConfigs) validate() error {
 	c.HostKeyAlgos = hostKeyAlgos
 	var kexAlgos []string
 	for _, algo := range c.KexAlgorithms {
-		if algo == "diffie-hellman-group18-sha512" {
+		if algo == "diffie-hellman-group18-sha512" || algo == ssh.KeyExchangeDHGEXSHA256 {
 			continue
 		}
 		if !util.Contains(supportedKexAlgos, algo) {
@@ -129,14 +129,19 @@ func (c *SFTPDConfigs) validate() error {
 			return util.NewValidationError(fmt.Sprintf("unsupported MAC algorithm %q", mac))
 		}
 	}
+	for _, algo := range c.PublicKeyAlgos {
+		if !util.Contains(supportedPublicKeyAlgos, algo) {
+			return util.NewValidationError(fmt.Sprintf("unsupported public key algorithm %q", algo))
+		}
+	}
 	return nil
 }
 
 func (c *SFTPDConfigs) getACopy() *SFTPDConfigs {
 	hostKeys := make([]string, len(c.HostKeyAlgos))
 	copy(hostKeys, c.HostKeyAlgos)
-	moduli := make([]string, len(c.Moduli))
-	copy(moduli, c.Moduli)
+	publicKeys := make([]string, len(c.PublicKeyAlgos))
+	copy(publicKeys, c.PublicKeyAlgos)
 	kexs := make([]string, len(c.KexAlgorithms))
 	copy(kexs, c.KexAlgorithms)
 	ciphers := make([]string, len(c.Ciphers))
@@ -145,11 +150,11 @@ func (c *SFTPDConfigs) getACopy() *SFTPDConfigs {
 	copy(macs, c.MACs)
 
 	return &SFTPDConfigs{
-		HostKeyAlgos:  hostKeys,
-		Moduli:        moduli,
-		KexAlgorithms: kexs,
-		Ciphers:       ciphers,
-		MACs:          macs,
+		HostKeyAlgos:   hostKeys,
+		PublicKeyAlgos: publicKeys,
+		KexAlgorithms:  kexs,
+		Ciphers:        ciphers,
+		MACs:           macs,
 	}
 }
 
@@ -186,13 +191,22 @@ func (c *SMTPOAuth2) validate() error {
 		return util.NewValidationError("smtp oauth2: unsupported provider")
 	}
 	if c.ClientID == "" {
-		return util.NewValidationError("smtp oauth2: client id is required")
+		return util.NewI18nError(
+			util.NewValidationError("smtp oauth2: client id is required"),
+			util.I18nErrorSMTPClientIDRequired,
+		)
 	}
 	if c.ClientSecret == nil {
-		return util.NewValidationError("smtp oauth2: client secret is required")
+		return util.NewI18nError(
+			util.NewValidationError("smtp oauth2: client secret is required"),
+			util.I18nErrorSMTPClientSecretRequired,
+		)
 	}
 	if c.RefreshToken == nil {
-		return util.NewValidationError("smtp oauth2: refresh token is required")
+		return util.NewI18nError(
+			util.NewValidationError("smtp oauth2: refresh token is required"),
+			util.I18nErrorSMTPRefreshTokenRequired,
+		)
 	}
 	if err := validateSMTPSecret(c.ClientSecret, "oauth2 client secret"); err != nil {
 		return err
@@ -249,7 +263,10 @@ func (c *SMTPConfigs) validate() error {
 		}
 	}
 	if c.User == "" && c.From == "" {
-		return util.NewValidationError("smtp: from address and user cannot both be empty")
+		return util.NewI18nError(
+			util.NewValidationError("smtp: from address and user cannot both be empty"),
+			util.I18nErrorSMTPRequiredFields,
+		)
 	}
 	if c.AuthType < 0 || c.AuthType > 3 {
 		return util.NewValidationError(fmt.Sprintf("smtp: invalid auth type %d", c.AuthType))
@@ -336,7 +353,10 @@ func (c *ACMEConfigs) validate() error {
 		return nil
 	}
 	if c.Email == "" && !util.IsEmailValid(c.Email) {
-		return util.NewValidationError(fmt.Sprintf("acme: invalid email %q", c.Email))
+		return util.NewI18nError(
+			util.NewValidationError(fmt.Sprintf("acme: invalid email %q", c.Email)),
+			util.I18nErrorInvalidEmail,
+		)
 	}
 	if c.HTTP01Challenge.Port <= 0 || c.HTTP01Challenge.Port > 65535 {
 		return util.NewValidationError(fmt.Sprintf("acme: invalid HTTP-01 challenge port %d", c.HTTP01Challenge.Port))

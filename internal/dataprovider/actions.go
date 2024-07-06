@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -148,7 +148,7 @@ func executeNotificationCommand(operation, executor, ip, objectType, objectName,
 		fmt.Sprintf("SFTPGO_PROVIDER_IP=%s", ip),
 		fmt.Sprintf("SFTPGO_PROVIDER_ROLE=%s", role),
 		fmt.Sprintf("SFTPGO_PROVIDER_TIMESTAMP=%d", util.GetTimeAsMsSinceEpoch(time.Now())),
-		fmt.Sprintf("SFTPGO_PROVIDER_OBJECT=%s", string(objectAsJSON)))
+		fmt.Sprintf("SFTPGO_PROVIDER_OBJECT=%s", util.BytesToString(objectAsJSON)))
 
 	startTime := time.Now()
 	err := cmd.Run()

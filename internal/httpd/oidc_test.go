@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -101,9 +102,10 @@ func TestOIDCInitialization(t *testing.T) {
 	config := OIDC{}
 	err := config.initialize()
 	assert.NoError(t, err)
+	secret := "jRsmE0SWnuZjP7djBqNq0mrf8QN77j2c"
 	config = OIDC{
 		ClientID:        "sftpgo-client",
-		ClientSecret:    "jRsmE0SWnuZjP7djBqNq0mrf8QN77j2c",
+		ClientSecret:    util.GenerateUniqueID(),
 		ConfigURL:       fmt.Sprintf("http://%v/", oidcMockAddr),
 		RedirectBaseURL: "http://127.0.0.1:8081/",
 		UsernameField:   "preferred_username",
@@ -114,10 +116,19 @@ func TestOIDCInitialization(t *testing.T) {
 		assert.Contains(t, err.Error(), "oidc: required scope \"openid\" is not set")
 	}
 	config.Scopes = []string{oidc.ScopeOpenID}
+	config.ClientSecretFile = "missing file"
+	err = config.initialize()
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+	secretFile := filepath.Join(os.TempDir(), util.GenerateUniqueID())
+	defer os.Remove(secretFile)
+	err = os.WriteFile(secretFile, []byte(secret), 0600)
+	assert.NoError(t, err)
+	config.ClientSecretFile = secretFile
 	err = config.initialize()
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "oidc: unable to initialize provider")
 	}
+	assert.Equal(t, secret, config.ClientSecret)
 	config.ConfigURL = fmt.Sprintf("http://%v/auth/realms/sftpgo", oidcMockAddr)
 	err = config.initialize()
 	assert.NoError(t, err)
@@ -137,7 +148,7 @@ func TestOIDCLoginLogout(t *testing.T) {
 	assert.NoError(t, err)
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Authentication state did not match")
+	assert.Contains(t, rr.Body.String(), util.I18nInvalidAuth)
 
 	expiredAuthReq := oidcPendingAuth{
 		State:    xid.New().String(),
@@ -151,7 +162,7 @@ func TestOIDCLoginLogout(t *testing.T) {
 	assert.NoError(t, err)
 	server.router.ServeHTTP(rr, r)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "Authentication state did not match")
+	assert.Contains(t, rr.Body.String(), util.I18nInvalidAuth)
 	oidcMgr.removePendingAuth(expiredAuthReq.State)
 
 	server.binding.OIDC.oauth2Config = &mockOAuth2Config{
@@ -1246,7 +1257,7 @@ func TestOIDCEvMgrIntegration(t *testing.T) {
 		Nonce:  authReq.Nonce,
 		Expiry: time.Now().Add(5 * time.Minute),
 	}
-	setIDTokenClaims(idToken, []byte(`{"preferred_username":"`+util.JSONEscape(username)+`","custom1":{"sub":"val1"},"custom2":"desc"}`))
+	setIDTokenClaims(idToken, []byte(`{"preferred_username":"`+util.JSONEscape(username)+`","custom1":{"sub":"val1"},"custom2":"desc"}`)) //nolint:goconst
 	server.binding.OIDC.verifier = &mockOIDCVerifier{
 		err:   nil,
 		token: idToken,

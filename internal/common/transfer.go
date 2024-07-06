@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -16,6 +16,8 @@ package common
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"path"
 	"sync"
 	"sync/atomic"
@@ -221,12 +223,11 @@ func (t *BaseTransfer) SetCancelFn(cancelFn func()) {
 // converts it into a more understandable form for the client if it is a
 // well-known type of error
 func (t *BaseTransfer) ConvertError(err error) error {
-	if t.Fs.IsNotExist(err) {
-		return t.Connection.GetNotExistError()
-	} else if t.Fs.IsPermission(err) {
-		return t.Connection.GetPermissionDeniedError()
+	var pathError *fs.PathError
+	if errors.As(err, &pathError) {
+		return fmt.Errorf("%s %s: %s", pathError.Op, t.GetVirtualPath(), pathError.Err.Error())
 	}
-	return err
+	return t.Connection.GetFsError(t.Fs, err)
 }
 
 // CheckRead returns an error if read if not allowed
@@ -351,6 +352,9 @@ func (t *BaseTransfer) checkUploadOutsideHomeDir(err error) int {
 	if err == nil {
 		return 0
 	}
+	if t.ErrTransfer == nil {
+		t.ErrTransfer = err
+	}
 	if Config.TempPath == "" {
 		return 0
 	}
@@ -389,7 +393,7 @@ func (t *BaseTransfer) Close() error {
 		t.Connection.Log(logger.LevelWarn, "upload denied due to space limit, delete temporary file: %q, deletion error: %v",
 			t.effectiveFsPath, err)
 	} else if t.isAtomicUpload() {
-		if t.ErrTransfer == nil || Config.UploadMode == UploadModeAtomicWithResume {
+		if t.ErrTransfer == nil || Config.UploadMode&UploadModeAtomicWithResume != 0 {
 			_, _, err = t.Fs.Rename(t.effectiveFsPath, t.fsPath)
 			t.Connection.Log(logger.LevelDebug, "atomic upload completed, rename: %q -> %q, error: %v",
 				t.effectiveFsPath, t.fsPath, err)
@@ -409,7 +413,8 @@ func (t *BaseTransfer) Close() error {
 	var uploadFileSize int64
 	if t.transferType == TransferDownload {
 		logger.TransferLog(downloadLogSender, t.fsPath, elapsed, t.BytesSent.Load(), t.Connection.User.Username,
-			t.Connection.ID, t.Connection.protocol, t.Connection.localAddr, t.Connection.remoteAddr, t.ftpMode)
+			t.Connection.ID, t.Connection.protocol, t.Connection.localAddr, t.Connection.remoteAddr, t.ftpMode,
+			t.ErrTransfer)
 		ExecuteActionNotification(t.Connection, operationDownload, t.fsPath, t.requestPath, "", "", "", //nolint:errcheck
 			t.BytesSent.Load(), t.ErrTransfer, elapsed, t.metadata)
 	} else {
@@ -430,7 +435,8 @@ func (t *BaseTransfer) Close() error {
 		t.updateQuota(numFiles, uploadFileSize)
 		t.updateTimes()
 		logger.TransferLog(uploadLogSender, t.fsPath, elapsed, t.BytesReceived.Load(), t.Connection.User.Username,
-			t.Connection.ID, t.Connection.protocol, t.Connection.localAddr, t.Connection.remoteAddr, t.ftpMode)
+			t.Connection.ID, t.Connection.protocol, t.Connection.localAddr, t.Connection.remoteAddr, t.ftpMode,
+			t.ErrTransfer)
 	}
 	if t.ErrTransfer != nil {
 		t.Connection.Log(logger.LevelError, "transfer error: %v, path: %q", t.ErrTransfer, t.fsPath)
@@ -500,7 +506,7 @@ func (t *BaseTransfer) getUploadedFiles() int {
 
 func (t *BaseTransfer) updateTimes() {
 	if !t.aTime.IsZero() && !t.mTime.IsZero() {
-		err := t.Fs.Chtimes(t.fsPath, t.aTime, t.mTime, true)
+		err := t.Fs.Chtimes(t.fsPath, t.aTime, t.mTime, false)
 		t.Connection.Log(logger.LevelDebug, "set times for file %q, atime: %v, mtime: %v, err: %v",
 			t.fsPath, t.aTime, t.mTime, err)
 	}

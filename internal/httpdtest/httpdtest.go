@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2023 Nicola Murino
+// Copyright (C) 2019 Nicola Murino
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published
@@ -283,6 +283,7 @@ func AddGroup(group dataprovider.Group, expectedStatusCode int) (dataprovider.Gr
 		body, _ = getResponseBody(resp)
 	}
 	if err == nil {
+		group.UserSettings.Filters.TLSCerts = nil
 		err = checkGroup(group, newGroup)
 	}
 	return newGroup, body, err
@@ -1599,6 +1600,12 @@ func checkEventAction(expected, actual dataprovider.BaseEventAction) error {
 	if expected.Options.PwdExpirationConfig.Threshold != actual.Options.PwdExpirationConfig.Threshold {
 		return errors.New("password expiration threshold mismatch")
 	}
+	if expected.Options.UserInactivityConfig.DisableThreshold != actual.Options.UserInactivityConfig.DisableThreshold {
+		return errors.New("user inactivity disable threshold mismatch")
+	}
+	if expected.Options.UserInactivityConfig.DeleteThreshold != actual.Options.UserInactivityConfig.DeleteThreshold {
+		return errors.New("user inactivity delete threshold mismatch")
+	}
 	if err := compareEventActionIDPConfigFields(expected.Options.IDPConfig, actual.Options.IDPConfig); err != nil {
 		return err
 	}
@@ -1969,6 +1976,12 @@ func compareAdminFilters(expected, actual dataprovider.AdminFilters) error {
 	if expected.Preferences.DefaultUsersExpiration != actual.Preferences.DefaultUsersExpiration {
 		return errors.New("default users expiration mismatch")
 	}
+	if expected.RequirePasswordChange != actual.RequirePasswordChange {
+		return errors.New("require password change mismatch")
+	}
+	if expected.RequireTwoFactor != actual.RequireTwoFactor {
+		return errors.New("require two factor mismatch")
+	}
 	return nil
 }
 
@@ -2199,6 +2212,9 @@ func compareS3Config(expected *vfs.Filesystem, actual *vfs.Filesystem) error { /
 	if expected.S3Config.ForcePathStyle != actual.S3Config.ForcePathStyle {
 		return errors.New("fs S3 force path style mismatch")
 	}
+	if expected.S3Config.SkipTLSVerify != actual.S3Config.SkipTLSVerify {
+		return errors.New("fs S3 skip TLS verify mismatch")
+	}
 	if expected.S3Config.DownloadPartMaxTime != actual.S3Config.DownloadPartMaxTime {
 		return errors.New("fs S3 download part max time mismatch")
 	}
@@ -2409,6 +2425,16 @@ func compareUserFilterSubStructs(expected sdk.BaseUserFilters, actual sdk.BaseUs
 			return errors.New("web client options contents mismatch")
 		}
 	}
+
+	if len(expected.TLSCerts) != len(actual.TLSCerts) {
+		return errors.New("TLS certs mismatch")
+	}
+	for _, cert := range expected.TLSCerts {
+		if !util.Contains(actual.TLSCerts, cert) {
+			return errors.New("TLS certs content mismatch")
+		}
+	}
+
 	return compareUserFiltersEqualFields(expected, actual)
 }
 
@@ -2490,6 +2516,9 @@ func compareUserFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters
 	if err := compareUserBandwidthLimitFilters(expected, actual); err != nil {
 		return err
 	}
+	if err := compareAccessTimeFilters(expected, actual); err != nil {
+		return err
+	}
 	return compareUserFilePatternsFilters(expected, actual)
 }
 
@@ -2503,6 +2532,26 @@ func checkFilterMatch(expected []string, actual []string) bool {
 		}
 	}
 	return true
+}
+
+func compareAccessTimeFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
+	if len(expected.AccessTime) != len(actual.AccessTime) {
+		return errors.New("access time filters mismatch")
+	}
+
+	for idx, p := range expected.AccessTime {
+		if actual.AccessTime[idx].DayOfWeek != p.DayOfWeek {
+			return errors.New("access time day of week mismatch")
+		}
+		if actual.AccessTime[idx].From != p.From {
+			return errors.New("access time from mismatch")
+		}
+		if actual.AccessTime[idx].To != p.To {
+			return errors.New("access time to mismatch")
+		}
+	}
+
+	return nil
 }
 
 func compareUserBandwidthLimitFilters(expected sdk.BaseUserFilters, actual sdk.BaseUserFilters) error {
@@ -2763,9 +2812,6 @@ func compareEventActionDataRetentionFields(expected, actual dataprovider.EventAc
 				}
 				if f1.DeleteEmptyDirs != f2.DeleteEmptyDirs {
 					return fmt.Errorf("delete_empty_dirs mismatch for folder %s", f1.Path)
-				}
-				if f1.IgnoreUserPermissions != f2.IgnoreUserPermissions {
-					return fmt.Errorf("ignore_user_permissions mismatch for folder %s", f1.Path)
 				}
 				break
 			}
