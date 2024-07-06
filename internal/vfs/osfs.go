@@ -385,29 +385,29 @@ func (fs *OsFs) ResolvePath(virtualPath string) (string, error) {
 		virtualPath = strings.TrimPrefix(virtualPath, fs.mountPath)
 	}
 	r := filepath.Clean(filepath.Join(fs.rootDir, virtualPath))
-	p, err := filepath.EvalSymlinks(r)
-	if isInvalidNameError(err) {
-		err = os.ErrNotExist
-	}
-	isNotExist := fs.IsNotExist(err)
-	if err != nil && !isNotExist {
-		return "", err
-	} else if isNotExist {
-		// The requested path doesn't exist, so at this point we need to iterate up the
-		// path chain until we hit a directory that _does_ exist and can be validated.
-		_, err = fs.findFirstExistingDir(r)
-		if err != nil {
-			fsLog(fs, logger.LevelError, "error resolving non-existent path %q", err)
-		}
-		return r, err
-	}
+	//_, err := filepath.EvalSymlinks(r)
+	//if isInvalidNameError(err) {
+	//	err = os.ErrNotExist
+	//}
+	//isNotExist := fs.IsNotExist(err)
+	//if err != nil && !isNotExist {
+	//	return "", err
+	//} else if isNotExist {
+	//	// The requested path doesn't exist, so at this point we need to iterate up the
+	//	// path chain until we hit a directory that _does_ exist and can be validated.
+	//	_, err = fs.findFirstExistingDir(r)
+	//	if err != nil {
+	//		fsLog(fs, logger.LevelError, "error resolving non-existent path %q", err)
+	//	}
+	//	return r, err
+	//}
 
-	err = fs.isSubDir(p)
-	if err != nil {
-		fsLog(fs, logger.LevelError, "Invalid path resolution, path %q original path %q resolved %q err: %v",
-			p, virtualPath, r, err)
-	}
-	return r, err
+	//err = fs.isSubDir(p)
+	//if err != nil {
+	//	fsLog(fs, logger.LevelError, "Invalid path resolution, path %q original path %q resolved %q err: %v",
+	//		p, virtualPath, r, err)
+	//}
+	return r, nil
 }
 
 // RealPath implements the FsRealPather interface
@@ -539,6 +539,7 @@ func (fs *OsFs) isSubDir(sub string) error {
 	}
 	if len(sub) < len(parent) {
 		err = fmt.Errorf("path %q is not inside %q", sub, parent)
+		//return nil
 		return &pathResolutionError{err: err.Error()}
 	}
 	separator := string(os.PathSeparator)
@@ -549,6 +550,7 @@ func (fs *OsFs) isSubDir(sub string) error {
 	}
 	if !strings.HasPrefix(sub, parent+separator) {
 		err = fmt.Errorf("path %q is not inside %q", sub, parent)
+		//return nil
 		return &pathResolutionError{err: err.Error()}
 	}
 	return nil
