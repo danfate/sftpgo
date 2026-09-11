@@ -1,0 +1,129 @@
+name: Build symbolic release image
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Upstream stable tag used as the release baseline, for example v2.7.5.
+        required: true
+        type: string
+      revision:
+        description: Symbolic image revision for this upstream tag.
+        default: sym.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: symbolic-release-${{ inputs.upstream_tag }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  prepare:
+    name: Verify release baseline
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.release.outputs.image_tag }}
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      created: ${{ steps.release.outputs.created }}
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify release baseline
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          if ! [[ "$UPSTREAM_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "upstream_tag must be a stable version tag such as v2.7.5"
+            exit 1
+          fi
+          git fetch --no-tags https://github.com/drakkan/sftpgo.git "+refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}"
+          git rev-parse --verify "${UPSTREAM_TAG}^{commit}"
+          git merge-base --is-ancestor "${UPSTREAM_TAG}" HEAD
+
+      - name: Set release information
+        id: release
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          if ! [[ "$REVISION" =~ ^sym\.[0-9]+$ ]]; then
+            echo "revision must use the form sym.N, for example sym.1"
+            exit 1
+          fi
+          echo "image_tag=${UPSTREAM_TAG}-${REVISION}" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.name }} image
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: full
+            suffix: ""
+            optional_packages: true
+          - name: slim
+            suffix: -slim
+            optional_packages: false
+    steps:
+      - name: Checkout verified commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.image_tag }}${{ matrix.suffix }}
+            ${{ env.IMAGE_NAME }}:sym-stable${{ matrix.suffix }}
+          cache-from: type=gha,scope=symbolic-${{ inputs.upstream_tag }}-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=symbolic-${{ inputs.upstream_tag }}-${{ matrix.name }}
+          build-args: |
+            COMMIT_SHA=${{ needs.prepare.outputs.commit_sha }}
+            INSTALL_OPTIONAL_PACKAGES=${{ matrix.optional_packages }}
+            DOWNLOAD_PLUGINS=false
+            FEATURES=nopgxregisterdefaulttypes,disable_grpc_modules,unixcrypt
+          labels: |
+            org.opencontainers.image.title=SFTPGo symbolic build
+            org.opencontainers.image.description=Private SFTPGo build with legacy symbolic link support
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.documentation=${{ github.server_url }}/${{ github.repository }}/blob/${{ needs.prepare.outputs.commit_sha }}/docker/README.md
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.image_tag }}${{ matrix.suffix }}
+            org.opencontainers.image.created=${{ needs.prepare.outputs.created }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.commit_sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+
