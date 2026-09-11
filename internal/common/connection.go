@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -326,6 +327,7 @@ func (c *BaseConnection) ListDir(virtualPath string) (*DirListerAt, error) {
 	}
 	return &DirListerAt{
 		virtualPath: virtualPath,
+		fsPath:      fsPath,
 		conn:        c,
 		fs:          fs,
 		info:        c.User.GetVirtualFoldersInfo(virtualPath),
@@ -904,7 +906,8 @@ func (c *BaseConnection) CreateSymlink(virtualSourcePath, virtualTargetPath stri
 		return c.GetPermissionDeniedError()
 	}
 	if !c.User.HasPerm(dataprovider.PermCreateSymlinks, path.Dir(virtualTargetPath)) ||
-		!c.User.HasPerm(dataprovider.PermCreateSymlinks, path.Dir(virtualSourcePath)) {
+		(!(Config.IsLegacySymlinkMode() && vfs.IsLocalOrCryptoFs(fs)) &&
+			!c.User.HasPerm(dataprovider.PermCreateSymlinks, path.Dir(virtualSourcePath))) {
 		return c.GetPermissionDeniedError()
 	}
 	ok, policy := c.User.IsFileAllowed(virtualSourcePath)
@@ -1790,6 +1793,7 @@ func (c *BaseConnection) GetFsAndResolvedPath(virtualPath string) (vfs.Fs, strin
 // DirListerAt defines a directory lister implementing the ListAt method.
 type DirListerAt struct {
 	virtualPath string
+	fsPath      string
 	conn        *BaseConnection
 	fs          vfs.Fs
 	info        []os.FileInfo
@@ -1837,6 +1841,25 @@ func (l *DirListerAt) Next(limit int) ([]os.FileInfo, error) {
 		if err != nil && !errors.Is(err, io.EOF) {
 			l.conn.Log(logger.LevelDebug, "error retrieving directory entries: %+v", err)
 			return files, l.conn.GetFsError(l.fs, err)
+		}
+		if Config.IsLegacySymlinkMode() && vfs.IsLocalOrCryptoFs(l.fs) &&
+			(l.conn.protocol == ProtocolFTP || l.conn.protocol == ProtocolWebDAV) {
+			for idx, file := range files {
+				if file.Mode()&os.ModeSymlink == 0 {
+					continue
+				}
+				target, statErr := l.fs.Stat(filepath.Join(l.fsPath, file.Name()))
+				if statErr != nil {
+					continue
+				}
+				targetMode := target.Mode()
+				if vfs.IsCryptOsFs(l.fs) {
+					target = l.fs.(*vfs.CryptFs).ConvertFileInfo(target)
+				}
+				info := vfs.NewFileInfo(file.Name(), target.IsDir(), target.Size(), target.ModTime(), false)
+				info.SetMode(targetMode)
+				files[idx] = info
+			}
 		}
 		files = l.conn.User.FilterListDir(files, l.virtualPath)
 		if len(l.info) > 0 {

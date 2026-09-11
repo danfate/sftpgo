@@ -128,6 +128,9 @@ const (
 	SymlinkModeAllowLocal = 1
 	// SymlinkModeAllowSFTP allows symbolic link creation on the SFTP backend.
 	SymlinkModeAllowSFTP = 2
+	// SymlinkModeAllowRootEscape enables the legacy local filesystem behavior:
+	// symbolic links may resolve outside the user's root directory.
+	SymlinkModeAllowRootEscape = 4
 )
 
 func init() {
@@ -254,6 +257,7 @@ func Initialize(c Configuration, isShared int) error {
 	vfs.SetTempPath(c.TempPath)
 	dataprovider.SetTempPath(c.TempPath)
 	vfs.SetAllowSelfConnections(c.AllowSelfConnections)
+	vfs.SetAllowRootEscape(c.IsLegacySymlinkMode())
 	vfs.SetRenameMode(c.RenameMode)
 	vfs.SetReadMetadataMode(c.Metadata.Read)
 	vfs.SetResumeMaxSize(c.ResumeMaxSize)
@@ -582,9 +586,11 @@ type Configuration struct {
 	// filesystem, so SFTPGo will recursively list the directory contents and do a rename for each entry
 	RenameMode int `json:"rename_mode" mapstructure:"rename_mode"`
 	// SymlinkMode is a bit mask that selects the backends on which clients holding the
-	// create_symlinks permission may create symbolic links. 0 (default) disables creation
+	// create_symlinks permission may create symbolic links. 0 disables creation
 	// on every backend; add 1 to allow it on the local filesystem (including its encrypted
-	// variant), 2 to allow it on the SFTP backend, 3 for both.
+	// variant), 2 to allow it on the SFTP backend, 3 for both. Add 4 to enable the legacy
+	// local filesystem behavior that allows links to escape the user's root directory and
+	// presents their targets in FTP/WebDAV directory listings.
 	SymlinkMode int `json:"symlink_mode" mapstructure:"symlink_mode"`
 	// ResumeMaxSize defines the maximum size allowed, in bytes, to resume uploads on storage backends
 	// with immutable objects. By default, resuming uploads is not allowed for cloud storage providers
@@ -688,6 +694,11 @@ func (c *Configuration) IsSymlinkCreationAllowed(fs vfs.Fs) bool {
 	default:
 		return false
 	}
+}
+
+// IsLegacySymlinkMode returns true if local symbolic links may escape the user's root directory.
+func (c *Configuration) IsLegacySymlinkMode() bool {
+	return c.SymlinkMode&SymlinkModeAllowRootEscape != 0
 }
 
 func (c *Configuration) initializeProxyProtocol() error {

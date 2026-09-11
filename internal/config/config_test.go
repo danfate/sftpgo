@@ -263,6 +263,30 @@ func TestInvalidRenameMode(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestLegacySymlinkMode(t *testing.T) {
+	reset()
+
+	confName := tempConfigName + ".json"
+	configFilePath := filepath.Join(configDir, confName)
+	commonConfig := config.GetCommonConfig()
+	commonConfig.SymlinkMode = common.SymlinkModeAllowLocal | common.SymlinkModeAllowRootEscape
+	c := make(map[string]any)
+	c["common"] = commonConfig
+	jsonConf, err := json.Marshal(c)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configFilePath, jsonConf, os.ModePerm))
+	t.Cleanup(func() { _ = os.Remove(configFilePath) })
+
+	require.NoError(t, config.LoadConfig(configDir, confName))
+	assert.Equal(t, 5, config.GetCommonConfig().SymlinkMode)
+}
+
+func TestLegacySymlinkModeDefault(t *testing.T) {
+	reset()
+
+	assert.Equal(t, 5, config.GetCommonConfig().SymlinkMode)
+}
+
 func TestDefenderProviderDriver(t *testing.T) {
 	if config.GetProviderConf().Driver != dataprovider.SQLiteDataProviderName {
 		t.Skip("this test is not supported with the current database provider")
@@ -1596,6 +1620,7 @@ func TestConfigFromEnv(t *testing.T) {
 	os.Setenv("SFTPGO_TELEMETRY__TLS_PROTOCOLS", "h2")
 	os.Setenv("SFTPGO_HTTPD__SETUP__INSTALLATION_CODE", "123")
 	os.Setenv("SFTPGO_ACME__HTTP01_CHALLENGE__PORT", "5002")
+	os.Setenv("SFTPGO_COMMON__SYMLINK_MODE", "5")
 	t.Cleanup(func() {
 		os.Unsetenv("SFTPGO_SFTPD__BINDINGS__0__ADDRESS")
 		os.Unsetenv("SFTPGO_WEBDAVD__BINDINGS__0__PORT")
@@ -1609,6 +1634,7 @@ func TestConfigFromEnv(t *testing.T) {
 		os.Unsetenv("SFTPGO_TELEMETRY__TLS_PROTOCOLS")
 		os.Unsetenv("SFTPGO_HTTPD__SETUP__INSTALLATION_CODE")
 		os.Unsetenv("SFTPGO_ACME__HTTP01_CHALLENGE_PORT")
+		os.Unsetenv("SFTPGO_COMMON__SYMLINK_MODE")
 	})
 	err := config.LoadConfig(configDir, "")
 	assert.NoError(t, err)
@@ -1633,4 +1659,5 @@ func TestConfigFromEnv(t *testing.T) {
 	assert.Equal(t, "123", config.GetHTTPDConfig().Setup.InstallationCode)
 	acmeConfig := config.GetACMEConfig()
 	assert.Equal(t, 5002, acmeConfig.HTTP01Challenge.Port)
+	assert.Equal(t, 5, config.GetCommonConfig().SymlinkMode)
 }

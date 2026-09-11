@@ -69,6 +69,7 @@ var (
 	tempPath                 string
 	sftpFingerprints         []string
 	allowSelfConnections     int
+	allowRootEscape          bool
 	renameMode               int
 	readMetadata             int
 	resumeMaxSize            int64
@@ -85,6 +86,11 @@ var (
 // SetAllowSelfConnections sets the desired behaviour for self connections
 func SetAllowSelfConnections(value int) {
 	allowSelfConnections = value
+}
+
+// SetAllowRootEscape allows local symbolic links to resolve outside the filesystem root.
+func SetAllowRootEscape(value bool) {
+	allowRootEscape = value
 }
 
 // SetTempPath sets the path for temporary files

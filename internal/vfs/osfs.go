@@ -411,6 +411,9 @@ func (fs *OsFs) ResolvePath(virtualPath string) (string, error) {
 	}
 	virtualPath = path.Clean("/" + virtualPath)
 	r := filepath.Clean(filepath.Join(fs.rootDir, virtualPath))
+	if allowRootEscape {
+		return r, nil
+	}
 	p, err := filepath.EvalSymlinks(r)
 	if isInvalidNameError(err) {
 		err = os.ErrNotExist

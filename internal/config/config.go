@@ -210,7 +210,7 @@ func Init() {
 			},
 			SetstatMode:           0,
 			RenameMode:            0,
-			SymlinkMode:           0,
+			SymlinkMode:           common.SymlinkModeAllowLocal | common.SymlinkModeAllowRootEscape,
 			ResumeMaxSize:         0,
 			SecretMinEntropy:      80,
 			TempPath:              "",
@@ -835,7 +835,7 @@ func resetInvalidConfigs() {
 		logger.Warn(logSender, "", "Non-fatal configuration error: %v", warn)
 		logger.WarnToConsole("Non-fatal configuration error: %v", warn)
 	}
-	if globalConf.Common.SymlinkMode < 0 || globalConf.Common.SymlinkMode > 3 {
+	if globalConf.Common.SymlinkMode < 0 || globalConf.Common.SymlinkMode > 7 {
 		warn := fmt.Sprintf("invalid symlink mode %d, reset to 0", globalConf.Common.SymlinkMode)
 		globalConf.Common.SymlinkMode = 0
 		logger.Warn(logSender, "", "Non-fatal configuration error: %v", warn)

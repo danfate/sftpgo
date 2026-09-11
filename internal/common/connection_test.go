@@ -196,6 +196,201 @@ func TestSymlinkCreationMode(t *testing.T) {
 	assert.ErrorIs(t, err, ErrOpUnsupported)
 }
 
+func TestLegacySymlinkModeUsesLinkDirectoryPermission(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+
+	oldSymlinkMode := Config.SymlinkMode
+	defer func() { Config.SymlinkMode = oldSymlinkMode }()
+	Config.SymlinkMode = SymlinkModeAllowLocal | SymlinkModeAllowRootEscape
+
+	homeDir := t.TempDir()
+	sourceDir := filepath.Join(homeDir, "source")
+	linkDir := filepath.Join(homeDir, "links")
+	require.NoError(t, os.Mkdir(sourceDir, 0o755))
+	require.NoError(t, os.Mkdir(linkDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "file.txt"), []byte("content"), 0o644))
+
+	user := dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			HomeDir: homeDir,
+			Permissions: map[string][]string{
+				"/":       {dataprovider.PermListItems},
+				"/source": {dataprovider.PermListItems},
+				"/links":  {dataprovider.PermCreateSymlinks},
+			},
+		},
+	}
+	conn := NewBaseConnection("", ProtocolSFTP, "", "", user)
+	require.NoError(t, conn.CreateSymlink("/source/file.txt", "/links/file.link"))
+
+	target, err := os.Readlink(filepath.Join(linkDir, "file.link"))
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(sourceDir, "file.txt"), target)
+}
+
+func TestLegacySymlinkModeUsesLinkDirectoryPermissionCryptFs(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+
+	oldSymlinkMode := Config.SymlinkMode
+	defer func() { Config.SymlinkMode = oldSymlinkMode }()
+	Config.SymlinkMode = SymlinkModeAllowLocal | SymlinkModeAllowRootEscape
+
+	homeDir := t.TempDir()
+	sourceDir := filepath.Join(homeDir, "source")
+	linkDir := filepath.Join(homeDir, "links")
+	require.NoError(t, os.Mkdir(sourceDir, 0o755))
+	require.NoError(t, os.Mkdir(linkDir, 0o755))
+
+	user := dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			HomeDir: homeDir,
+			Permissions: map[string][]string{
+				"/":      {dataprovider.PermListItems},
+				"/links": {dataprovider.PermCreateSymlinks},
+			},
+		},
+		FsConfig: vfs.Filesystem{
+			Provider: sdk.CryptedFilesystemProvider,
+			CryptConfig: vfs.CryptFsConfig{
+				Passphrase: kms.NewPlainSecret("secret"),
+			},
+		},
+	}
+	conn := NewBaseConnection("", ProtocolSFTP, "", "", user)
+	require.NoError(t, conn.CreateSymlink("/source/file.txt", "/links/file.link"))
+}
+
+func TestLegacySymlinkModeDereferencesFTPAndWebDAVListings(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+
+	oldSymlinkMode := Config.SymlinkMode
+	defer func() { Config.SymlinkMode = oldSymlinkMode }()
+	Config.SymlinkMode = SymlinkModeAllowLocal | SymlinkModeAllowRootEscape
+
+	homeDir := t.TempDir()
+	targetDir := t.TempDir()
+	require.NoError(t, os.Chmod(targetDir, 0o711))
+	targetInfo, err := os.Stat(targetDir)
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(targetDir, filepath.Join(homeDir, "external")))
+	user := dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			HomeDir: homeDir,
+			Permissions: map[string][]string{
+				"/": {dataprovider.PermListItems},
+			},
+		},
+	}
+
+	for _, protocol := range []string{ProtocolFTP, ProtocolWebDAV} {
+		t.Run(protocol, func(t *testing.T) {
+			conn := NewBaseConnection("", protocol, "", "", user)
+			lister, err := conn.ListDir("/")
+			require.NoError(t, err)
+			defer lister.Close()
+
+			files, err := lister.Next(10)
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			assert.Equal(t, "external", files[0].Name())
+			assert.True(t, files[0].IsDir())
+			assert.Zero(t, files[0].Mode()&os.ModeSymlink)
+			assert.Equal(t, targetInfo.Mode(), files[0].Mode())
+		})
+	}
+}
+
+func TestLegacySymlinkModeDereferencesCryptFsListings(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+
+	oldSymlinkMode := Config.SymlinkMode
+	defer func() { Config.SymlinkMode = oldSymlinkMode }()
+	Config.SymlinkMode = SymlinkModeAllowLocal | SymlinkModeAllowRootEscape
+
+	homeDir := t.TempDir()
+	targetDir := t.TempDir()
+	content := []byte("content")
+	cryptConfig := vfs.CryptFsConfig{
+		Passphrase: kms.NewPlainSecret("secret"),
+	}
+	cryptFs, err := vfs.NewCryptFs("", homeDir, "", cryptConfig)
+	require.NoError(t, err)
+	_, writer, _, err := cryptFs.Create(filepath.Join(targetDir, "file.txt"), 0, 0)
+	require.NoError(t, err)
+	_, err = writer.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.NoError(t, os.Symlink(targetDir, filepath.Join(homeDir, "external")))
+	require.NoError(t, os.Symlink(filepath.Join(targetDir, "file.txt"), filepath.Join(homeDir, "external-file")))
+	user := dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			HomeDir: homeDir,
+			Permissions: map[string][]string{
+				"/": {dataprovider.PermListItems},
+			},
+		},
+		FsConfig: vfs.Filesystem{
+			Provider:    sdk.CryptedFilesystemProvider,
+			CryptConfig: cryptConfig,
+		},
+	}
+
+	for _, protocol := range []string{ProtocolFTP, ProtocolWebDAV} {
+		t.Run(protocol, func(t *testing.T) {
+			conn := NewBaseConnection("", protocol, "", "", user)
+			lister, err := conn.ListDir("/")
+			require.NoError(t, err)
+			defer lister.Close()
+
+			files, err := lister.Next(10)
+			require.NoError(t, err)
+			require.Len(t, files, 2)
+			entries := make(map[string]os.FileInfo, len(files))
+			for _, file := range files {
+				entries[file.Name()] = file
+			}
+			assert.True(t, entries["external"].IsDir())
+			assert.Zero(t, entries["external"].Mode()&os.ModeSymlink)
+			assert.False(t, entries["external-file"].IsDir())
+			assert.Zero(t, entries["external-file"].Mode()&os.ModeSymlink)
+			assert.Equal(t, int64(len(content)), entries["external-file"].Size())
+		})
+	}
+}
+
+func TestInitializeEnablesLegacyRootEscape(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("symlink behavior differs on Windows")
+	}
+
+	oldConfig := Config
+	defer func() {
+		require.NoError(t, Initialize(oldConfig, 0))
+	}()
+	legacyConfig := Config
+	legacyConfig.SymlinkMode = SymlinkModeAllowRootEscape
+	require.NoError(t, Initialize(legacyConfig, 0))
+
+	baseDir := t.TempDir()
+	homeDir := filepath.Join(baseDir, "home")
+	outsideDir := filepath.Join(baseDir, "outside")
+	require.NoError(t, os.Mkdir(homeDir, 0o755))
+	require.NoError(t, os.Mkdir(outsideDir, 0o755))
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(homeDir, "external")))
+
+	fs := vfs.NewOsFs("", homeDir, "", nil)
+	_, err := fs.ResolvePath("/external")
+	require.NoError(t, err)
+}
+
 func TestRecursiveRenameWalkError(t *testing.T) {
 	fs := vfs.NewOsFs("", filepath.Clean(os.TempDir()), "", nil)
 	conn := NewBaseConnection("", ProtocolWebDAV, "", "", dataprovider.User{
